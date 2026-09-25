@@ -5102,8 +5102,8 @@ private fun ensureHillshade(style: Style) {
     if (style.getLayer(HILLSHADE_LAYER) == null) {
         val hs = HillshadeLayer(HILLSHADE_LAYER, DEM_SRC).withProperties(
             PropertyFactory.hillshadeExaggeration(0.32f),
-            PropertyFactory.hillshadeShadowColor("#6b7280"),
-            PropertyFactory.hillshadeHighlightColor("#ffffff"),
+            PropertyFactory.hillshadeShadowColor(Expression.literal("#6b7280")),
+            PropertyFactory.hillshadeHighlightColor(Expression.literal("#ffffff")),
             PropertyFactory.hillshadeAccentColor("#9aa0a6"),
             // OFF by default (Google doesn't shade terrain unless you ask) - the Topography toggle
             // flips it via ensureTopography. Added hidden so a fresh style starts flat.
@@ -6629,8 +6629,8 @@ internal fun applyLight(style: StyleLayers) {
     // Terrain relief: a soft warm-gray shadow, subtle so hills read as depth, not dirt.
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
         PropertyFactory.hillshadeExaggeration(0.32f),
-        PropertyFactory.hillshadeShadowColor("#6b7280"),
-        PropertyFactory.hillshadeHighlightColor("#ffffff"),
+        PropertyFactory.hillshadeShadowColor(Expression.literal("#6b7280")),
+        PropertyFactory.hillshadeHighlightColor(Expression.literal("#ffffff")),
         PropertyFactory.hillshadeAccentColor("#9aa0a6"),
     )
 }
@@ -6726,8 +6726,8 @@ internal fun applyDark(style: StyleLayers) {
     // highlight so ridges catch a little moonlight (a touch stronger than light).
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
         PropertyFactory.hillshadeExaggeration(0.45f),
-        PropertyFactory.hillshadeShadowColor("#0a1018"),
-        PropertyFactory.hillshadeHighlightColor("#3a4a68"),
+        PropertyFactory.hillshadeShadowColor(Expression.literal("#0a1018")),
+        PropertyFactory.hillshadeHighlightColor(Expression.literal("#3a4a68")),
         PropertyFactory.hillshadeAccentColor("#0a1018"),
     )
 }
@@ -6799,8 +6799,8 @@ internal fun applyAmoled(style: StyleLayers) {
     style.getLayer("vela-bikeroutes")?.setProperties(PropertyFactory.lineColor("#0D2D36"))
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
         PropertyFactory.hillshadeExaggeration(0.3f),
-        PropertyFactory.hillshadeShadowColor(black),
-        PropertyFactory.hillshadeHighlightColor("#1A2030"),
+        PropertyFactory.hillshadeShadowColor(Expression.literal(black)),
+        PropertyFactory.hillshadeHighlightColor(Expression.literal("#1A2030")),
         PropertyFactory.hillshadeAccentColor(black),
     )
 }
@@ -6877,8 +6877,8 @@ internal fun applyClassicLight(style: StyleLayers) {
     }
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
         PropertyFactory.hillshadeExaggeration(0.32f),
-        PropertyFactory.hillshadeShadowColor("#6b7280"),
-        PropertyFactory.hillshadeHighlightColor("#ffffff"),
+        PropertyFactory.hillshadeShadowColor(Expression.literal("#6b7280")),
+        PropertyFactory.hillshadeHighlightColor(Expression.literal("#ffffff")),
         PropertyFactory.hillshadeAccentColor("#9aa0a6"),
     )
 }
@@ -6957,8 +6957,8 @@ internal fun applyClassicDark(style: StyleLayers) {
     style.getLayer("vela-bikeroutes")?.setProperties(PropertyFactory.lineColor("#1f8f9c"))
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
         PropertyFactory.hillshadeExaggeration(0.4f),
-        PropertyFactory.hillshadeShadowColor("#0b0d10"),
-        PropertyFactory.hillshadeHighlightColor("#4a4d55"),
+        PropertyFactory.hillshadeShadowColor(Expression.literal("#0b0d10")),
+        PropertyFactory.hillshadeHighlightColor(Expression.literal("#4a4d55")),
         PropertyFactory.hillshadeAccentColor("#0b0d10"),
     )
 }
