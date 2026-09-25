@@ -1,5 +1,7 @@
 package app.vela.core.data.tiles
 
+import app.vela.core.data.tiles.TiandiTuStatellite.TK
+
 /**
  * Base-layer styles. Default is **OpenFreeMap Liberty** — a full detailed OSM
  * vector style (roads, labels, POIs) served free with no API key, so the map
@@ -34,4 +36,24 @@ enum class MapStyle(val label: String, val uri: String) {
 object GoogleRasterTiles {
     fun tiles(layers: String = "m"): List<String> =
         (0..3).map { "https://mt$it.google.com/vt/lyrs=$layers&x={x}&y={y}&z={z}" }
+}
+
+object GoogleSatelliteTiles {
+    private const val SUBDOMAINS = 4
+    fun tiles(layers: String = "s"): Array<String> =
+        Array(SUBDOMAINS) { it ->
+            "https://mt$it.google.com/vt/lyrs=$layers&x={x}&y={y}&z={z}"
+        }
+}
+
+//"https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+
+object TiandiTuStatellite{
+    private const val TK = "982c56cebad276917fcc4b744bed5491"
+    private const val SUBDOMAINS = 8
+    fun tiles(): Array<String>  =
+                Array(SUBDOMAINS) { i ->
+                    "https://t$i.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk=$TK"
+                }
+            //(0 until SUBDOMAINS).map{"http://t$it.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk=$TK"}
 }

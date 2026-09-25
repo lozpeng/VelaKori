@@ -60,6 +60,8 @@ import org.maplibre.geojson.Point
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import app.vela.core.data.tiles.GoogleSatelliteTiles
+import app.vela.core.data.tiles.TiandiTuStatellite
 import org.maplibre.android.geometry.LatLng as MLLatLng
 import org.maplibre.android.geometry.LatLngBounds as MLLatLngBounds
 
@@ -5958,16 +5960,18 @@ private const val SAT_LAYER = "vela-sat"
 private const val SAT_ROADS_LAYER = "vela-sat-roads"
 // Esri World Imagery, the openly usable satellite tile service (attribution shown by the map UI
 // while the layer is on). z/y/x order; 19 is the safe global max.
-private const val SAT_TILES = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+private val SAT_TILES = TiandiTuStatellite.tiles()
+    //Array(1) { "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"}
 
 private const val SAT_DEEP_LAYER = "vela-sat-deep"
 private const val SAT_DEEP_SRC = "vela-sat-deep-src" // suffixed with the provider+level so a change swaps cleanly
-// Google's imagery tiles (the same keyless surface the rest of the app scrapes) - the DEEP-ZOOM
+// Google's imagery tiles (the same keyless surface the rest of the app scrapes) - the DEEP-aZOOM
 // FALLBACK only, used where Esri's native coverage stops at z19. Outside cities Google upsamples
 // rather than 404s, so the fallback never paints holes; true 404s (open ocean) fall back to the
 // overzoomed parent tile like any failed raster fetch.
-private const val SAT_G_TILES = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+private val SAT_G_TILES =GoogleSatelliteTiles.tiles() //"https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
 private const val SAT_DEEP_MIN_ZOOM = 18.6f // = the cross-fade's first stop; below it the layer was invisible yet loading tiles
+
 
 /** The deep-imagery layer for the current area: Esri at its probed native max level, or the Google
  *  fallback to z21. The source id carries provider+level, so moving between areas with different
@@ -5988,7 +5992,7 @@ private fun ensureSatelliteDeep(style: Style, on: Boolean, deep: Int) {
     val base = style.getLayer(SAT_LAYER) ?: return // base imagery must exist to sit on
     val tiles = if (deep == -1) SAT_G_TILES else SAT_TILES
     val max = if (deep == -1) 21f else deep.toFloat()
-    style.addSource(RasterSource(wantId, TileSet("2.2.0", tiles).apply { maxZoom = max }, 256))
+    style.addSource(RasterSource(wantId, TileSet("2.2.0", *tiles).apply { maxZoom = max }, 256))
     val layer = RasterLayer(SAT_DEEP_LAYER, wantId).withProperties(
         // Same dim + desaturate as the base imagery so labels stay readable (see ensureSatellite).
         PropertyFactory.rasterBrightnessMax(0.80f),
@@ -6147,7 +6151,7 @@ private fun ensureSatellite(style: Style, on: Boolean) {
     val present = style.getLayer(SAT_LAYER) != null
     if (on && !present) {
         if (style.getSource(SAT_SRC) == null) {
-            style.addSource(RasterSource(SAT_SRC, TileSet("2.2.0", SAT_TILES).apply { maxZoom = 19f }, 256))
+            style.addSource(RasterSource(SAT_SRC, TileSet("2.2.0", *SAT_TILES).apply { maxZoom = 18f }, 256))
         }
         val layer = RasterLayer(SAT_LAYER, SAT_SRC).withProperties(
             // Dim + desaturate a touch so the white-halo labels stay readable over bright
