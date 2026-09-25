@@ -1,8 +1,7 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.serialization)
-    alias(libs.plugins.kotlin.ksp)
+    alias(libs.plugins.kotlinx.serialization)
+    alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
 
@@ -22,7 +21,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 }
 
 dependencies {
@@ -30,7 +28,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.androidx.datastore.preferences)
-    implementation(libs.okhttp)
+    implementation(platform(libs.okhttp.bom))
+    implementation(libs.okhttp.core)
     implementation(libs.rhino.runtime)
     // OsmAnd obf routing engine (ObfRouteEngine): the router + binary obf reader as plain Java
     // jars, vendored from OsmAndMapCreator's lib (GPLv3, same license as Vela). Gitignored like

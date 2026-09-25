@@ -1,10 +1,10 @@
 import java.io.File
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
-    alias(libs.plugins.kotlin.ksp)
+    alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
     alias(libs.plugins.baselineprofile)
 }
@@ -183,7 +183,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -215,11 +214,11 @@ dependencies {
     // (no official Maven artifact; the JitPack coordinate doesn't resolve). Lives in :app because a
     // library module can't consume a local .aar — KokoroSynth sits in :app and bridges into :core's
     // VoiceGuide via an interface. Native .so are arm64-only in the package (see packaging{}).
-    implementation(files("libs/sherpa-onnx-1.13.3.aar"))
+    implementation(files("libs/sherpa-onnx-1.13.8.aar"))
     // Extracts the Kokoro model's .tar.bz2 at download time (Android has no built-in bzip2/tar).
     implementation("org.apache.commons:commons-compress:1.27.1")
 
-    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core)
     implementation(libs.androidx.webkit)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
@@ -233,7 +232,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.material.icons.extended)
-    implementation(libs.androidx.material3)
+    implementation(libs.androidx.compose.material3)
     implementation(libs.androidx.navigation.compose)
 
     implementation(libs.hilt.android)
@@ -256,5 +255,12 @@ dependencies {
 tasks.withType<Test>().configureEach {
     listOf("velaPmtiles", "velaLat", "velaLng", "velaArchive", "velaPatch", "velaFingerprint").forEach { k ->
         System.getProperty(k)?.let { systemProperty(k, it) }
+    }
+}
+
+// AGP 9.0: Kotlin 编译器选项通过顶层 kotlin 块配置（替代已被移除的 android.kotlinOptions）
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
     }
 }

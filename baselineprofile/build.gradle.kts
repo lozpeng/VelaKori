@@ -9,25 +9,28 @@
 // nonMinified variant installs over the existing app):
 //   VELA_KEYSTORE_PATH=... VELA_KEYSTORE_PASSWORD=... VELA_KEY_ALIAS=vela \
 //     ./gradlew :app:generateBaselineProfile
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
 plugins {
     alias(libs.plugins.android.test)
-    alias(libs.plugins.kotlin.android)
+    // AGP 9.0 已内置 Kotlin，不再需要 kotlin.android
+    // alias(libs.plugins.kotlin.android)   ← 删除
     alias(libs.plugins.baselineprofile)
 }
 
 android {
     namespace = "app.vela.baselineprofile"
-    compileSdk = 35
+    compileSdk = 36   // 与主项目对齐
     defaultConfig {
-        minSdk = 28
-        targetSdk = 35
+        minSdk = 28   // 宏基准测试要求 API 28+
+        targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+    // AGP 9.0: kotlinOptions 已移除，jvmTarget 通过顶层 kotlin.compilerOptions 配置（见文件末尾）
     targetProjectPath = ":app"
 
     testOptions.managedDevices.localDevices.create("pixel6Api34") {
@@ -47,7 +50,14 @@ baselineProfile {
 }
 
 dependencies {
-    implementation(libs.androidx.junit)
+    implementation(libs.androidx.test.junit)   // 原 libs.androidx.junit
     implementation(libs.androidx.uiautomator)
     implementation(libs.androidx.benchmark.macro)
+}
+
+// AGP 9.0: Kotlin 编译器选项通过顶层 kotlin 块配置
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_17)
+    }
 }
