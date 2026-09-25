@@ -12,6 +12,17 @@ Headings and dates are the originals; entries are in the order they were written
 roughly the order they were worked on.
 
 ## Recently shipped
+- **Cronet for Google requests (2026-09-23).** Search, directions, place data and the batchexecute
+  RPCs go over Chromium's network stack (HTTP/2 and HTTP/3 like Chrome) instead of OkHttp, behind
+  calibration `useCronet`; OsmAnd's bundled protobuf is relocated at build time so both coexist.
+- **A place tap without hidden pages (2026-09-23).** Photos, reviews and details (popular times
+  included) come from one plain request each, with retries; the whole gallery pages at 10 per
+  request. Cronet turned out not to be needed for popular times: Google answers a place's first
+  request stripped and the repeat in full, through OkHttp as well.
+- **Landmark fame by language count (2026-09-23).** The places bake adds how many languages OSM
+  names a landmark in to its notability, so a famous small-footprint landmark (the Berliner
+  Fernsehturm) no longer loses its cell's slots to big parks; the widest zooms' anchors use the same
+  score. Was the roadmap's "Landmark fame beyond outline size".
 - **Transit on open GTFS (2026-07-12/13).** Transitous (community MOTIS) is the primary source for
   departure boards, canonical stop icons on the map (offline-cached per area), and the tap-through
   stop timeline, which now reads the actual GTFS run: passed stops gray out, moved times show

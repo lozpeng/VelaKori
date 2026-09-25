@@ -153,6 +153,21 @@ Roughly in the order they are worth doing. Each one is small enough for a single
   the region's language when the phone's differs and keep the English copy for the sheet, or
   bake a romanized name into the archive where Overture carries none (it has no alternate names
   in Japan). Needs a device in the region; not chased blind.
+- **Cronet at Chrome's version (2026-09-23).** Google traffic rides Cronet 143 from Maven; Chrome is at
+  154 and the handshake differs by three signature algorithms. `cronet-build.yml` builds Cronet from
+  source at the Android stable tag (untested on a runner; runs once the file is on main). Also open:
+  turn `webProxy` on by default once it has run on real sessions for a while.
+- **One APK per chip type: flip the switch (2026-09-23).** Built and off: the updater picks the
+  APK for the phone's chip type (`update/ApkChoice`), the versionCode is `(2000+run)*10 + chip
+  digit`, CI and the F-Droid workflow handle per-chip releases (SPEC 15). What is left: once a
+  build with ApkChoice has been the stable for about three weeks, set the repository variable
+  `ABI_SPLITS` to `true`; then point README's install button at
+  `releases/latest/download/vela-maps-arm64.apk` and open each release's notes with "Most phones:
+  vela-maps-arm64.apk. Old 32-bit and keypad phones: armv7." An ARM phone then downloads 74 MB
+  instead of 108, and x86 gets Cronet.
+- **Review feed paging and the Menu tab without a page (2026-09-23).** Confirm the review feed's
+  next-page token (assumed at payload[1]) from a reply on a phone that is not in the limited view;
+  find whether `hspqX` can filter by gallery category, so the Menu tab needs no page walk either.
 - **iOS (2026-09-13, not started).** `:core` is plain Kotlin and would move to Kotlin
   Multiplatform with the Android-only bits (SQLite stores, WebView bridges, LocationManager)
   behind expect/actual seams; MapLibre has an iOS SDK, sherpa-onnx ships iOS builds, the hidden

@@ -54,9 +54,10 @@ Overture never has.
 Geofabrik extract go in beside the other two, because OSM is the one dataset in the stack that
 anyone can correct and see corrected in the next bake. It is the **first choice for a place's
 coordinate**: OSM maps the shop where the shop is, not at a parcel centroid. And on the phone,
-**Settings > Places > "OpenStreetMap shops too"** (on by default) also draws the businesses
-already present in the basemap tiles, for what the baked layer lacks; doubles are dropped by
-name.
+OSM's businesses and landmarks are baked into the archive itself now (with the world rebake of
+2026-09-23), so the basemap's own point layers hide over it and the old "OpenStreetMap shops too"
+switch is gone; an archive older than that still gets OSM's shops drawn under it, deduped by name.
+"Parks, schools and civic places" off hides the park, school and civic groups in the archive too.
 
 The result is one PMTiles archive per region on the `places-overlays` release, streamed by HTTP
 range requests as you pan, or downloaded whole with a region for offline use.
@@ -163,6 +164,18 @@ then postcode in Britain and Ireland, postcode then city everywhere else. OSM an
 rows rarely say their country, so they take the region's most common Overture country
 (`regioncc`). Every row in the Davis test box got one.
 
+**A row without a locality borrows its neighbor's** (the `LOCFILL` step, 2026-09-23, run just before
+the export). OpenStreetMap rows, and a few locator rows, often arrive with only a number and a
+street, so the tile would say "123 Main St" and stop. Such a row takes the `loc` of the nearest row
+that has one within about 300 m (0.0027 degrees, the longitude scaled by latitude), a
+postcode-bearing `loc` ahead of any nearer one without, and a row with nothing in reach stays as it
+was. It is a grid join over 0.004 degree cells and their eight neighbors, never a correlated
+lookup, because a per-row lookup is what made earlier rules quadratic over a whole state. The bake
+log prints `LOCFILL|<rows without>|<rows filled>`. On the Andorra test bake, 737 rows had no
+`loc` and 625 were filled, and 655 of the 676 OSM rows now carry an "AD400 <town>" line. It
+reaches a region at its next places rebake. The offline search does the same thing on the phone
+for place-pack rows ([chapter 8](08-offline.md#searching-with-no-signal)).
+
 **The ranks.** Each place is then ranked by prominence inside four nested grid cells: `frank`
 (about 100 m), `rank` (about 400 m), `crank` (about 1.6 km) and `xrank` (about 6.5 km, and only
 for landmark categories). The minimum zoom follows:
@@ -212,15 +225,17 @@ with the place, +0.6 when a chain's own locator matched it, +0.8 when OSM links 
 (`srcbonus`, added to prominence before the cells are ranked). The rest of the Tokyo cost is the
 basemap's own OSM point layers (`poi_r*`): hiding them on top of the cap measured 46 to 60 fps.
 
-**One set of map points** (2026-09-22, branch `places-one-set`, behind the `placesOneSetRev`
-calibration dial). The basemap's own point layers (Liberty's `poi_r1`/`poi_r7`/`poi_r20`, built by
+**One set of map points** (2026-09-22, behind the `placesOneSetRev` dial). The basemap's own point layers (Liberty's `poi_r1`/`poi_r7`/`poi_r20`, built by
 OpenFreeMap from OSM) drew parks, temples, schools and museums as a second set that the phone had
 to reconcile with Vela's places and that cost half the frame rate in Tokyo. The bake now takes
 those from the region's OSM extract (points and outlines; an outline sits at the average of its
 outer ring), so one archive holds every map point, ranked and budgeted together, and the app hides
 the basemap's copy over any archive baked on or after the dial's date. Landmarks get their own
 budget per ~1.6 km cell (4 at z14, 10 at z15), ordered by notability: outline size (log10 of the
-area, a hectare = +2) and a Wikidata link (+1.5 there, +2.0 on prominence). A landmark is never a
+area, a hectare = +2), a Wikidata link (+1.5 there, +2.0 on prominence) and, since 2026-09-23,
+FAME: how many languages OSM names it in (0.6 x log2(1 + languages), capped at +3; a world-famous
+tower carries dozens of `name:<lang>` tags, a pocket park none). The same score picks the anchor of
+each ~6.5 km cell for z11 and z12. A landmark is never a
 tenant, never folds into a business of the same name key, and gives its English name and Wikidata
 credit to the Overture row it merges into. Measured on test boxes (4a, pan fps; archive size):
 
@@ -238,7 +253,42 @@ the places workflow copies both onto the run's summary page, one block per regio
 at every city, so this is how a misfiring budget or notability order shows up after a world
 rebake. The Midtown test box: 361 landmarks, 81 (22%) by z15; the late ones were Broadway theaters,
 churches and pocket parks.
+The first world bake with the landmarks (2026-09-23, 448 archives) put 91% of about 3.6 million
+landmarks on the map by z15. For scale: the basemap's own point layers start at z15, so before this
+nothing of the kind showed below it anywhere. The lowest regions are dense historic capitals: Macau 53%, Hong Kong
+57%, Prague 62%, Berlin 64%, Washington DC 72%, Ile-de-France 78%, then Taiwan and Guangdong near
+80%. Their late rows are mostly pocket parks, side churches and palaces, which Google also keeps for
+close zoom. The one real miss is a famous landmark with a small footprint: the Berliner Fernsehturm
+scores 2.5 (Wikidata 1.5 plus a 1,000 m2 outline) and loses its cell's ten z15 slots to larger
+parks and museum buildings, so it arrives at z16. Outline size is the wrong measure of fame for a
+tower, which is what the languages term fixes. A Berlin Mitte test box before and after it: the
+Brandenburger Tor, Berliner Dom, Pergamonmuseum and Neue Synagoge move from z15 to z14, the
+Fernsehturm from z16 to z15, and the z11/z12 anchors become Museumsinsel and the Reichstag instead
+of a university campus and a library. It reaches the fleet with the next places rebake.
 At the widest street zooms in Midtown the dense bus-stop layer can still win the space.
+
+**The dial.** The app hides the basemap's point layers over a places archive whose `rev` is at
+least `placesOneSetRev`, read through `AppTune`:
+
+```
+placesOneSetRev = 20260923   // compiled default since 2026-09-24: the world rebake's rev
+                             // a debug.vela.tune.placesOneSetRev property wins, then the signed
+                             // calibration bundle's tuning value, then this default
+```
+
+An archive baked before that date has no landmarks, so over it the basemap's points still draw
+and nothing is lost; that is what the dial protects, and it must never go below the oldest archive
+that carries the landmarks. The default was a "never" value (99999999) until 2026-09-24, with the
+real date arriving only in the calibration bundle. That bundle reaches phones from `main`, so a
+canary build ahead of it kept `poi_r20` on in Manhattan and panned at under 1 fps below 200 ft.
+The cause was found by hiding layers one at a time with the `debug.vela.hide` property while the
+map's frame counter ran: on a Pixel 9, Midtown at about 200 ft panned at 3 fps against 59 at
+1000 ft, symbol layers were the whole cost, and hiding `poi_r20` alone (OpenStreetMap's
+lowest-rank points, thousands of them in Manhattan) brought it back to 60. On a Pixel 4a at 100 ft
+it is 0 to 25 fps with the dial off and 59 with it on. Swapping the layer's exclusion filter for a
+`match` lookup measured no better, so the cost is the layer itself, not its filter. The dial is
+still in the calibration bundle, so the fleet can be moved without a release; the compiled value
+only decides what a build does before that bundle arrives.
 
 **Names in every script, and English names** (2026-09-22). The name keys (`snapkey`, `nkey`) keep
 letters of every script, as the app's `PlaceNames` does. They used to keep only `a-z0-9`, so a

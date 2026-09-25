@@ -84,6 +84,10 @@
     <string name="map_voice_installing">Installing Vela Voice…</string>
     <string name="map_region_downloading">Downloading %1$s routing · %2$d%%</string> <!-- format -->
     <string name="map_region_places_downloading">Saving %1$s places for offline search · %2$d%%</string> <!-- format -->
+    <string name="map_region_placesfile_downloading">Saving %1$s places for the map · %2$d%%</string> <!-- format -->
+    <string name="map_region_map_downloading">Downloading the %1$s map · %2$d%%</string> <!-- format -->
+    <string name="mapvm_region_ready">%1$s is downloaded: map, routes and places work offline</string> <!-- format -->
+    <string name="mapvm_region_incomplete">%1$s is only partly downloaded. Connect and tap Update in Settings, Offline maps to finish it</string> <!-- format -->
     <string name="mapvm_poipack_ready">Places in %1$s are now searchable offline</string> <!-- format -->
     <string name="mapvm_poipack_unavailable">No place pack for %1$s yet. It\'ll appear here once it\'s published.</string> <!-- format -->
     <string name="settings_demo_drive">Simulate driving (demo)</string>
@@ -241,8 +245,6 @@
     <string name="settings_places_source_both_hint">Vela\'s data draws the map, and once you stop panning one Google request adds anything it lacks. The extras show online only, and they arrive a beat after the map, so a few icons appear late and can take a label off a neighbor as they land.</string>
     <string name="settings_places_source_more">Learn more</string>
     <string name="settings_places_source_more_credit">Overture Maps</string>
-    <string name="settings_osm_businesses">OpenStreetMap shops too</string>
-    <string name="settings_osm_businesses_hint">Also shows the shops, restaurants and other businesses mapped in OpenStreetMap that Vela\'s data lacks. OpenStreetMap edits appear here after the map tiles are rebuilt, usually within a week. On by default.</string>
     <string name="settings_places_lookup">Look up tapped places on Google</string>
     <string name="settings_places_lookup_hint">Tapping a place fetches its hours, reviews and photos from Google, and Vela remembers the match so the next tap is instant. Off = a tapped place shows only what Vela\'s data has (name, type, address, phone, website) and nothing about the tap reaches Google. Search and directions still use Google.</string>
     <string name="settings_places_source_more_title">Where Vela\'s place data comes from</string>
@@ -258,6 +260,22 @@
     <string name="settings_poi_icon_size_hint">Small suits low-resolution screens like car head units, where the default icons render oversized.</string>
     <string name="settings_live_rechecks">Live traffic re-checks while navigating</string>
     <string name="settings_live_rechecks_hint">Every couple of minutes during a drive, Vela asks Google for fresh traffic from your current position. That powers faster-route offers and the live arrival time, but it also tells Google where along the route you are. Off: your route still recalculates when you leave it.</string>
+    <string name="nav_edit_route">Edit route</string>
+    <string name="nav_edit_route_hint">Add a stop along the way</string>
+    <string name="nav_stops_remove_next">Remove next</string>
+    <string name="nav_stops_remove_confirm">Remove %1$s from this drive?</string> <!-- format -->
+    <string name="nav_stops_remove_action">Remove</string>
+    <string name="nav_stop_offer_remove">Remove stop</string>
+    <string name="settings_google_session">Google session</string>
+    <string name="settings_google_session_limited">Right now Google is giving this phone a limited view: fewer photos per page, no popular times on some places, and More reviews loads nothing. It usually lifts on its own after a while. A brand-new session starts out limited too, so starting one rarely helps.</string>
+    <string name="place_limited_view">Google is showing a limited view right now, so popular times and more reviews may be missing here.</string>
+    <string name="settings_google_session_hint">Google remembers this phone by a cookie, so what Vela looks up while it lasts can be linked together, without any name or account. Starting a new one caps that. A new session gets a shorter view from Google for a while (fewer reviews, popular times missing on some places).</string>
+    <string name="settings_google_session_week">Start a new one every week (recommended)</string>
+    <string name="settings_google_session_day">Start a new one every day</string>
+    <string name="settings_google_session_launch">Start a new one every time Vela opens (most private)</string>
+    <string name="settings_google_session_launch_hint">What this costs: Google treats every session as a new visitor, so you mostly get its shorter view (about five reviews, popular times often missing). Places load a little slower and use more data, because a new session\'s first answers come back trimmed and are asked again. Android restarts apps in the background, so this can mean several new sessions a day, and many new visitors from one connection can draw more of Google\'s bot checks. Google still sees your IP address, which links sessions from one connection over a short time anyway.</string>
+    <string name="settings_google_session_now">Start a new session now</string>
+    <string name="settings_google_session_done">New Google session started</string>
     <string name="settings_clear_history">Clear history</string>
     <string name="settings_clear_history_hint">Recent searches, recent places, parking history and recorded trips. Saved places and lists stay.</string>
     <string name="settings_clear_history_action">Clear</string>
@@ -445,6 +463,9 @@
         <item quantity="other">%1$d reviews</item>
     </plurals>
     <string name="place_all_n_reviews">All %1$d reviews · sort &amp; search</string> <!-- format -->
+    <string name="place_more_photos">More photos</string>
+    <string name="place_more_reviews">More reviews</string>
+    <string name="place_reviews_limited">Google is showing a shorter list of reviews right now.</string>
     <string name="place_all_reviews">All reviews · sort &amp; search</string>
     <string name="place_reviews_progress">Reviews · %1$d of about %2$d</string> <!-- format -->
     <string name="place_reviews_so_far">Reviews · %1$d so far</string> <!-- format -->
@@ -776,6 +797,13 @@
     <string name="map_import_needs_google">A shared Google Maps list can\'t open while Vela runs without Google.</string>
     <string name="map_link_needs_google">\"Open shared Google Maps links\" is off in Settings > Privacy.</string>
     <string name="map_link_unreadable">Couldn\'t open that link.</string>
+    <string name="settings_performance">Performance</string>
+    <string name="settings_hub_performance_sub">What loads ahead of time, map drawing</string>
+    <string name="settings_performance_intro">Loading things ahead of time makes them instant when you need them, and costs memory until then. The defaults follow how much memory this phone has.</string>
+    <string name="settings_full_place_load">Load all photos and reviews</string>
+    <string name="settings_full_place_load_hint">Off, a place loads its first few photos and first page of reviews, and More photos or All reviews fetch the rest. On, every place you open walks its whole photo gallery and up to 50 reviews, which is slower and sends Google many more requests.</string>
+    <string name="settings_speech_preload">Load voice search at startup</string>
+    <string name="settings_speech_preload_hint">Loads the voice search model when Vela opens, so the mic listens at once. It uses about 300 MB until two quiet minutes pass. Off, it loads when you tap into the search box. On by default on phones with about 8 GB of memory or more.</string>
     <string name="settings_google_free_links">Open shared Google Maps links</string>
     <string name="settings_google_free_links_hint">A short Google Maps link (maps.app.goo.gl) doesn\'t say where it points. With this on, Vela asks Google\'s link shortener once, with no cookies, and opens the place with the open sources. Full google.com/maps links open without asking. Shared lists still need Google.</string>
     <string name="map_import_failed">Couldn\'t import that list. Check the link and try again.</string>

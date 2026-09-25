@@ -81,7 +81,7 @@ abstract class HiddenWebView(
     protected open fun onReaped() {}
 
     /** Run [js] in the current page on the main thread (no-op when there is no view). */
-    protected suspend fun evaluate(js: String) = withContext(Dispatchers.Main) { webView?.evaluateJavascript(js, null) }
+    protected suspend fun evaluate(js: String) = withContext(Dispatchers.Main) { webView?.evaluateJavascript(JsNames.of(js), null) }
 
     /** A page finished loading for the request [requestId]: evaluate the extractor for it. */
     protected abstract fun onPageFinished(view: WebView, url: String?, requestId: String)
@@ -134,7 +134,9 @@ abstract class HiddenWebView(
         wv.settings.javaScriptEnabled = true
         wv.settings.domStorageEnabled = true
         WebViewIdentity.apply(wv.settings) // desktop UA -> desktop web Maps (mobile deep-links to intent://) + desktop client hints; X-Requested-With still goes out (unremovable, see WebViewIdentity)
-        wv.addJavascriptInterface(bridge(), "VelaBridge")
+        WebProxy.install(wv) // the POST shim, when the proxy is on (WebProxy)
+        SessionRotation.consumeCacheClear(wv) // the first Google WebView after a new session
+        wv.addJavascriptInterface(bridge(), JsNames.bridge)
         wv.webChromeClient = object : WebChromeClient() {
             override fun onConsoleMessage(m: ConsoleMessage): Boolean {
                 if (m.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
@@ -144,6 +146,10 @@ abstract class HiddenWebView(
             }
         }
         wv.webViewClient = object : WebViewClient() {
+            // Null unless calibration `webProxy` is on: then GETs go out over Cronet with this
+            // WebView's own cookies, without the X-Requested-With header (WebProxy).
+            override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): android.webkit.WebResourceResponse? =
+                WebProxy.intercept(request)
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val u = request?.url ?: return false
                 val scheme = u.scheme

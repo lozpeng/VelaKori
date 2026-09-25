@@ -1,5 +1,4 @@
 import java.io.File
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     alias(libs.plugins.android.application)
@@ -163,6 +162,19 @@ android {
         }
     }
 
+    // One APK per chip type (2026-09-23, `-PabiSplits`, turned on in CI by the ABI_SPLITS repo
+    // variable). Each output adds its chip's digit to the versionCode (ApkChoice.TAGS order:
+    // armv7 1, arm64 2, x86 3, x86_64 4; the all-in-one APK keeps 0), so the F-Droid repo sees
+    // distinct codes and moving from the all-in-one APK to a chip APK of the same build is an
+    // upgrade. Without the flag the build is the single all-in-one APK, as before.
+    splits {
+        abi {
+            isEnable = project.hasProperty("abiSplits")
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+            isUniversalApk = true
+        }
+    }
     buildTypes {
         release {
             // Always ship release: R8 here is what keeps map scroll/nav smooth
@@ -183,6 +195,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+   // kotlinOptions { jvmTarget = "17" }
     buildFeatures {
         compose = true
         buildConfig = true
@@ -198,6 +211,13 @@ android {
                 "**/x86/libonnxruntime.so", "**/x86/libsherpa-onnx*.so",
                 "**/x86_64/libonnxruntime.so", "**/x86_64/libsherpa-onnx*.so",
             )
+            // The all-in-one APK carries Cronet for ARM only (2026-09-23): x86 emulators and
+            // Chromebooks still install and run it, and their Google requests stay on OkHttp
+            // (CronetHolder fails to load the library and GoogleTransport falls back). Saves
+            // ~14 MB. A per-chip build keeps it: there the x86 APKs carry their own Cronet.
+            if (!project.hasProperty("abiSplits")) {
+                excludes += listOf("**/x86/libcronet*.so", "**/x86_64/libcronet*.so")
+            }
         }
     }
 }
@@ -218,8 +238,14 @@ dependencies {
     // Extracts the Kokoro model's .tar.bz2 at download time (Android has no built-in bzip2/tar).
     implementation("org.apache.commons:commons-compress:1.27.1")
 
-    implementation(libs.androidx.core)
+    implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.webkit)
+    // Cronet, Chromium's own network stack, for Google-host requests (app/net/CronetTransport,
+    // calibration `useCronet`) and the WebView proxy (`webProxy`). cronet-embedded 143 is published
+    // under the Chromium license (BSD) plus its dependencies' licenses; NOT the 500.x line, whose
+    // embedded artifact is deprecated and carries the Android SDK license. Its protobuf-javalite sits
+    // beside OsmAnd's old protobuf because :osmand-shaded relocates OsmAnd's copy.
+    implementation("org.chromium.net:cronet-embedded:143.7445.0")
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
@@ -258,9 +284,16 @@ tasks.withType<Test>().configureEach {
     }
 }
 
-// AGP 9.0: Kotlin 编译器选项通过顶层 kotlin 块配置（替代已被移除的 android.kotlinOptions）
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
+// The chip digit on each per-chip APK's versionCode (see `splits` in android {}).
+androidComponents {
+    onVariants { variant ->
+        variant.outputs.forEach { output ->
+            val abi = output.filters
+                .firstOrNull { it.filterType == com.android.build.api.variant.FilterConfiguration.FilterType.ABI }
+                ?.identifier ?: return@forEach
+            val digit = listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64").indexOf(abi) + 1
+            val base = (project.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 1
+            output.versionCode.set(base + digit)
+        }
     }
 }

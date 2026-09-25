@@ -82,11 +82,15 @@ There are two user agents in the app, and mixing them up is a bug.
 fallback, used only when the bundle does not carry one:
 
 ```
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
-SEC_CH_UA  = "\"Chromium\";v=\"153\", \"Google Chrome\";v=\"153\", \"Not/A)Brand\";v=\"24\""
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36"
+SEC_CH_UA  = "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\""
 ```
 
-Code reads the live pair from `CalibrationStore.current()`, never from the constants.
+Code reads the live pair from `CalibrationStore.current()`, never from the constants. The hint is
+not typed by hand anymore: Chrome computes the whole `Sec-CH-UA` value from its major version (a
+made-up "GREASE" brand whose punctuation, version and position rotate per release), and
+`BrowserHeaders.secChUaFor` does the same. The hand-typed 153 hint had kept an older release's
+GREASE brand under the new number, a combination no real Chrome sends.
 
 A user agent alone is not enough. Real Chrome sends a cluster of headers alongside it, and a
 Chrome UA with that cluster missing is a sharper inconsistency than an old version number. So
@@ -110,7 +114,10 @@ document. A request that carries them looks like one that saw the page. The phot
 adds `X-Same-Domain: 1`, which the `batchexecute` endpoint expects from a same-origin caller,
 and Street View tile fetches present themselves as a cross-site image load.
 
-**Why desktop.** A mobile string would match the phone's TLS stack and carrier IP better. But
+**Why desktop.** A mobile string would match the carrier IP better. It would not match the TLS
+handshake any better: measured on 2026-09-23, desktop Chromium and the Android WebView send the
+identical ClientHello and HTTP/2 settings, so Chrome's handshake does not say which platform it
+runs on. (OkHttp's handshake matches neither; it looks like OkHttp.) But
 mobile web Maps serves different markup and different endpoints, and every parser in the app
 was calibrated against the desktop responses. Switching to a mobile UA is a recalibration of
 every parser, not a header edit, and the `?0` and `"Windows"` hints would have to move with it.
@@ -125,6 +132,19 @@ can be reading a legacy code path that gets retired without warning, which from 
 looks exactly like ordinary calibration drift. The compiled value tracks Chrome's current
 Windows stable major, and not the next one: for a week in September 2026 it named a Chrome that
 had not shipped yet.
+
+**Checked every day.** `.github/workflows/google-health.yml` runs the app's own request builders
+and parsers against Google from the Davis fixture with the repo's `calibration.json`: search,
+directions, directions with avoid-highways (which proves the avoid flag still bites), and
+autocomplete. A reply the parsers cannot read fails the run and mails the maintainer; Google
+refusing a datacenter IP outright is only a warning, because it says nothing about the
+calibration. The same workflow fails when Chrome stable has moved a major past the one Vela claims
+for a week. The first run flagged exactly that: Chrome 154 went stable on 2026-09-09 while Vela
+still said 153 (the probe passed with a 154 UA).
+
+**No clockwork.** Every fixed wait before a Google request (the two-minute live-traffic recheck,
+retry backoffs, the stagger between a place's page loads) is drawn with a random spread through
+`Jitter`, so no two installs, and no two rechecks, keep the same beat.
 
 **Community services get the honest one.**
 
@@ -200,7 +220,7 @@ What the bundle can carry, from least to most powerful:
   the review scrape's words and CSS selectors (`reviewWords`, `reviewSelectors`). A word missing
   in some language, or a CSS class Google rotated, is a config edit rather than an app release.
   These tables were in the data class from day one but not read by the parser until 2026-07-19,
-  which is why adding a bundle field is two steps: the class, and `CalibrationStore.parse()`.
+  which is why adding a bundle field is two steps: the class, and `CalibrationStore.parseBundle()`.
 - **Fleet defaults**: the default voice, speaker and speed, the map palette, the places source,
   and the classic route picker switch. A user's own setting always wins over these.
 - **Tuning dials**, a flat name-to-number map read through `Calibration.tune(key, default)`. A
@@ -306,7 +326,98 @@ autocomplete and the map's place fan-out go through OkHttp and do not. `WebViewI
 makes the allow-list call, gated, in case a WebView build ever honors it, and logs one
 `VelaWeb identity:` line per view saying which switches took. Overriding the header on the
 document load alone was considered and not done: the page's own script requests would still
-carry it.
+carry it. The one way around it is not to let the WebView send the request at all, which is what
+the proxy below does, off by default.
+
+**Bridge names are random.** A scrape reports back through a JavaScript interface, and
+`addJavascriptInterface` puts that object on the page's `window`, where Google's own scripts can
+enumerate it. A fixed `VelaBridge` or `VelaPanel` sitting there named the app to anyone who
+looked. Since 2026-09-23 `web/JsNames` draws both names once per process (an underscore and ten
+random letters). The scripts are still written with the readable names, and `JsNames.of` swaps the
+real ones in right before every `evaluateJavascript`, so a new script call has to go through
+`JsNames.of` or its bridge calls go nowhere. The proxy's own bridge and the parameter it tags
+requests with are drawn the same way.
+
+### The WebView proxy
+
+Behind the calibration dial `webProxy` (default 0, off), `web/WebProxy.kt` takes a Google
+WebView's requests away from the WebView and sends them from the app over Cronet, with the
+WebView's own cookies (`WebViewCookieJar`) so the page keeps its session. A request the app sends
+carries no `X-Requested-With`. Any failure returns null and the WebView loads that request itself,
+exactly as before.
+
+- **GETs** are intercepted directly and streamed.
+- **POSTs** cannot be: `shouldInterceptRequest` never sees a request body. So a document-start
+  script (`WebProxy.SHIM`, dial `webProxyPosts`, default 1 when the proxy is on) wraps XHR, `fetch`
+  and `sendBeacon` on google.com pages. A POST to a Google host gets a one-time id appended to its
+  URL and its body handed to the bridge first; when the tagged request reaches the interceptor, the
+  body is waiting for it, the tag is stripped and the app sends it. Only plain-text bodies (a
+  string or URL parameters) are carried; FormData, a Blob or a Request object goes out from the
+  WebView as before. Measured on a Pixel 9 before the shim, the POSTs left were the review page's
+  `batchexecute`, `play.google.com/log` and the account bar's `ogads-pa` calls.
+- **Telemetry is answered locally** (dial `webProxyBlockLogs`, default 1 when the proxy is on):
+  `play.google.com/log`, any `gen_204` ping and the account bar's `ogads-pa` get an empty 200 from
+  the app and never leave the phone. Nothing Vela reads depends on them; they are the page
+  reporting on itself, and ad blockers drop them too. The answer carries CORS headers that echo
+  the page's origin, and it is a 200 on purpose: an intercepted 204 reached the page without those
+  headers on a Pixel 4a, so every blocked call turned into a console error.
+
+Logcat `VelaWebProxy` prints each path once, as `carries:`, `answers locally:` or
+`passes through:` (still sent by the WebView, with the header). The dial is read on every request,
+but the POST shim is installed only when a view is built, so turning the proxy on reaches POSTs
+from the next view.
+
+### Which Google session, and how long it lives
+
+**Google limits new anonymous sessions** (the measurement is under
+[Place data](#place-data-the-methods-and-how-to-roll-each-one-back)): a session that has only just
+started gets about five reviews, no paging, and on a busy place no popular times. The app's own
+cookie jar lives in memory, so its session is new every launch; the WebView's cookies are on disk
+and age. So the per-place requests (details, the photo pages, the review feed) are tagged
+`AgedSession` in `GoogleMapsDataSource`, and the Cronet transport sends a tagged request with the
+WebView's cookies instead of the app's (dial `agedSession`, default 1). It needs no page load and
+sends no `X-Requested-With`. Without Cronet the tag does nothing and the request keeps the app's
+session. On a fresh install the WebView store is empty too, so the first requests are a new
+session either way.
+
+**A saved cookie is a history.** It carries no name or account, but everything an install asks
+Google for while one cookie lasts can be linked together. So the session is thrown away on a
+schedule (`web/SessionRotation`, Settings > Privacy > "Google session", pref
+`google_session_rotate`):
+
+| Setting | A new session | What it costs |
+| --- | --- | --- |
+| Every week (default) | when the last one is 7 days old | at most a week of linkable history; a stretch of the limited view after each reset |
+| Every day | when the last one is 24 hours old | at most a day |
+| Every time Vela opens | at every process start | the limited view is the normal state, first answers come back trimmed and are asked again, and Android restarting the app in the background can mean several new sessions a day |
+
+The check runs once per process start, in `VelaApp` before the Cronet engine opens. The first run
+only records when the session began. **A rotation clears** the WebView's cookies (on a background
+thread, because the cookie manager loads the WebView library), its site storage (on the next idle
+moment of the main thread), Cronet's disk cache (only at process start, since it is not safe to
+delete once the engine has it open) and, the first time a Google WebView is built afterwards, that
+WebView's HTTP cache (`consumeCacheClear`, which every WebView-built fetcher calls). "Start a new
+session now" does the same by hand and also empties the app's in-memory jar. The WebView store
+holds only Google: no other site is loaded in a WebView. Logcat `VelaSession` says when a rotation
+happened.
+
+This is the trade-off, not a fix for it. Keeping one session for good gives the full view and one
+long pseudonymous history; a new one every launch gives the least history and mostly the limited
+view. Session standing, not age alone, decides which view Google gives: on 2026-09-23 a Pixel 4a
+whose WebView session was weeks old was already in the limited view while a Pixel 9's was not.
+Whichever it is, Google still sees the IP address, which links sessions from one connection over
+a short time anyway.
+
+**Telling the user.** In the limited view the place sheet gets quietly thinner, which reads as a
+broken app. So Vela watches for it (`web/GoogleStanding`). The first photo request asks for 50
+photos: a full session gets 50, a limited one gets 10 with more pages waiting. On 2026-09-25 two
+phones on one connection, running the same query in the same minute, split exactly that way, and
+only the one that got 10 was missing popular times. So a first page of 20 or fewer with a next page
+marks the session limited, and so does "More reviews" loading nothing on the full reviews page; a
+first page of 40 or more clears it. A missing popular-times chart on its own proves nothing (many
+places have none), so it never marks anything. While marked, a Google place with no chart shows one
+dim line where the chart would be ("Google is showing a limited view right now..."), and Settings >
+Privacy > Google session says the same. The mark belongs to the session: any rotation clears it.
 
 ### The slim early-session answer
 
@@ -438,6 +549,82 @@ servers (toast `map_import_needs_google`); with Google on it imports as before. 
 prints where a short link pointed, cut before the `@` coordinates and the query. The FAQ's full cost list is in [docs/FAQ.md](../FAQ.md#can-i-use-vela-without-google-at-all);
 what still works with no network at all is [chapter 8](08-offline.md).
 
+## Place data: the methods, and how to roll each one back
+
+Since 2026-09-23 a place tap asks Google for each piece of its sheet with ONE plain request,
+where it used to load Google's whole web app in up to three hidden WebViews (several hundred
+requests per tap, which is the kind of volume that puts a session into Google's limited view).
+Every new method keeps the old one behind it as the fallback, and each can be switched back
+without a release. This table is the record to revert from.
+
+| Piece | Now | Falls back to | Remote switch (calibration `tuning`) | Before 2026-09-23 |
+|---|---|---|---|---|
+| First photos | `hspqX` RPC, one request of 10 (`placePhotoPage`), dated | two more tries; then the sheet keeps the search's hero photo and "More photos" walks the page | `nativePlacePhotos` 0 | the full page walk (every gallery tab) on every tap |
+| More photos | the next `hspqX` page, one request per 10 (cursor at `[4][2][2]` of the request, payload[5] of the reply) | one retry, then the full page walk | `nativePlacePhotos` 0 | the same walk |
+| Menu tab | only from the page walk: "Load all photos and reviews" on, or "More photos" after native paging fails. The RPC carries no category per photo | none | none | the walk on every tap |
+| First reviews | the page scrape, stopped at 10 (DEFAULT). The one-request `qv9Egd` feed (`reviewFeed`) is built but OFF: it rides the app's own session, which is new every launch, and Google limits new sessions to 5 reviews | the page scrape | `nativeReviewFeed` 1 turns the feed on (compiled default 0) | the page scrape to 50 on every tap |
+| More reviews (inline) | the feed's next page, when a reply carries a token (UNVERIFIED: no captured reply has one yet) | the All reviews page | follows `nativeReviewFeed` | the scrape already held up to 50 |
+| All reviews | Google's own page, full screen, on tap | none | none | the same |
+| Details (popular times, blurb, count, hours) | the search reply when it has them; else ONE plain request of the details page's own search (`placeDetails`, same parser), up to three tries while popular times are missing | the details page, only when every try came back stripped | `nativeDetails` 0 | the details page on nearly every tap |
+| Page warm-ups after a search | none | none | none | google.com + Maps loaded in two hidden views per search |
+| Transport for every Google request | Cronet (Chrome's network stack, HTTP/2 or HTTP/3) | OkHttp on any Cronet failure | `useCronet` 0 | OkHttp |
+| Session for per-place requests (details, photo pages, the review feed) | the WebView's aged Google session, sent over Cronet (`AgedSession` tag, `WebViewCookieJar`): the app's own session is new every launch and Google gives it a limited view, which dropped popular times on busy places | the app's session when Cronet is off | `agedSession` 0 | the app's session |
+| WebView page loads | the WebView itself; the Cronet proxy (no `X-Requested-With`, the WebView's own cookies) when on: GETs directly, Google POSTs through a document-start shim that hands their bodies to a randomly named bridge (`webProxyPosts`), and the page's telemetry (`play.google.com/log`, `gen_204`, the account bar's `ogads-pa`) answered locally with an empty 200 (`webProxyBlockLogs`) | the WebView itself | `webProxy` 1 turns it ON (default 0); `webProxyPosts` / `webProxyBlockLogs` 0 turn the parts off | the WebView itself |
+| Neighbor prefetch (ambient) | Google-only mode | none | none | every mode, ~60 requests per map settle |
+
+**Google limits NEW anonymous sessions** (measured 2026-09-23 on a healthy Pixel 9): the same phone's
+weeks-old WebView session loads the full review feed, while a brand-new WebView session there, and
+the app's own native session (its cookies live in memory, so it is new every launch), get the
+limited view: five reviews, no more pages, no Reviews tab. Clearing cookies therefore never
+escapes the limited view; it throws away the aged session that works. Photos and details answered
+in full on fresh sessions, so they stay on the one-request path. Making the native feed useful
+means giving the app ONE persistent session shared with the WebView (a privacy trade-off: one
+long-lived anonymous Google identity per install instead of a new one per launch), which is open.
+
+What the one-request methods depend on:
+
+- **The `x-maps-diversion-context-bin` header** (`Calibration.rpcContext`, `CAE=` today) on every
+  batchexecute POST. Without it the feed answers empty and the gallery answers zero photos,
+  which is what "bot-gated since July" really was. If Google changes the value, push the new
+  one in `rpcContext`; blank stops sending it. The daily health check (`google-health.yml`)
+  requests both RPCs, so a change shows as DRIFT the next morning.
+- **The feed's proto** (`Calibration.reviewFeedProto`, `{FID}` and `{TOKEN}`) and the photo
+  proto (`photosProto`), both remote.
+- **Google answers a place's FIRST request stripped** and the same request seconds later in full
+  (the details search on the 4a: 45 KB without popular times, then 93 KB with them, through OkHttp
+  and Cronet alike, so it is not the TLS handshake). Every piece tries up to three times (about
+  2.5 s, then 3.5 to 4 s apart) before any page load. Some replies still come back without
+  popular times after three tries; the sheet then shows none and the next open after the 15-minute
+  details cache tries again.
+- **Retry timing is remote too:** `placeRetryMs` (2500, the wait before the second try),
+  `placeRetryStepMs` (1000 more per later try) and `placeTries` (3, then the page fallback).
+- **Per-place cache:** photos and the feed are kept 6 hours, details 15 minutes (popular times
+  carry the live "busy right now"), 80 places each, for the life of the process.
+
+Order to reach for when something breaks:
+
+1. **A calibration push** (no release): set `nativePlacePhotos` or `nativeReviewFeed` to 0 to put
+   everyone back on the page paths, or fix `rpcContext` / the protos. Installed builds pick it up
+   within about five minutes of the commit to main.
+2. **Per user:** Settings > Performance > "Load all photos and reviews" restores the full walk
+   and 50 reviews on that phone.
+3. **Code:** the commits on main are titled "Opening a place asks Google for its photos and
+   reviews in one request each...", "Review and photo requests retry once...", "Opening a place
+   loads its first photos and reviews instead of everything...", and the cache and More reviews
+   commit after them. Reverting them restores the page loads.
+
+`VelaPlaceLoad` logcat lines and the `reviews` diagnostics events say which path each piece took
+on a given tap ("photos: rpc 10", "photos: cache 10", "reviews: feed 5 (limited view)",
+"reviews: feed 0, scraping the page", "details: missing [popularTimes]; details page").
+
+Cost, like for like. A tap used to load up to three Google web apps (several hundred requests)
+and walk the whole gallery in 13 to 15 s. Now it is the resolve search (Vela-data and basemap
+taps only) plus one to three plain requests each for photos, reviews and details, and no page in
+the usual case; each piece lands 0.3 to 4 s after the tap (up to about 9 s when details use all
+three tries). The whole gallery is still there: one request per 10 photos ("More photos"), about
+20 requests for a 200-photo place against one walk of several hundred, and it streams while the
+walk made you wait for everything.
+
 ## Limits
 
 - **The TLS fingerprint is Android's, not Chrome's.** Matching Chrome's JA3/JA4 and HTTP/2 frame
@@ -445,12 +632,16 @@ what still works with no network at all is [chapter 8](08-offline.md).
   break reproducible F-Droid builds. Vela does not try. It is the reason the WebViews exist, and
   the reason the photo RPC and live popular times are closed.
 - **Smaller residual tells, left alone:** Chrome sends `X-Client-Data` to Google origins and
-  neither client here does; the WebViews and OkHttp keep separate cookie jars, so one phone is
-  two sessions from one IP; `Accept-Language` stays `en-US,en;q=0.9` even when `hl` asks for
-  another language.
-- **`X-Requested-With: app.vela`** names the app on every WebView request, and no app can stop
-  it. It is confined to the WebView-backed features; turning those off (or the whole switch)
-  is the only way to avoid it.
+  neither client here does; search, directions and autocomplete use the app's own in-memory
+  jar while the per-place requests use the WebView's, so one phone is two sessions from one IP;
+  `Accept-Language` stays `en-US,en;q=0.9` even when `hl` asks for another language.
+- **`X-Requested-With: app.vela`** names the app on every request the WebView sends itself, and
+  nothing in the WebView can stop it. It is confined to the WebView-backed features. The proxy
+  keeps it off whatever the app sends instead, but the proxy is off by default and a POST body it
+  cannot read still goes out from the WebView; turning those features off (or the whole switch)
+  is the only certain way.
+- **Rotation is checked only at process start.** A process that lives past the week keeps its
+  session until the next start or the button.
 - **The map's own Google tiles** (the traffic overlay and the satellite fallback) go through
   the map engine's HTTP stack, not `BrowserHeaders`, so they do not carry the Chrome identity.
 - **The live bundle carries no `userAgent` today**, so every installed copy presents the UA

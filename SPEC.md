@@ -355,12 +355,13 @@ so a recalibrated template survives.
   byte-identical to the live web client's, injected time fields are ignored or rejected. The
   honest stand-in is the typical spread `[10][4]`.
 - The `listentitiesreviews` RPC. It 404s for everyone and only ever served avatars.
-- The `hspqX` photo RPC. It is bot-degraded per session to a Street-View-only reply; retries
-  in the same session return byte-identical degraded bodies. The page DOM walk replaces it.
-- Per-photo upload dates. The RPC that carries them returns zero photos to an automated
-  browser even with the page's own fresh token, and the place page does not embed photo URLs
-  at walk time. The date-join plumbing stays in place and inert, and the RPC is not sent: the
-  `photoDatesRpc` tuning dial (default 0) turns it back on from the signed calibration.
+- (Revived 2026-09-23) The `hspqX` photo RPC and the `qv9Egd` review feed. Both answer a plain
+  request that carries `x-maps-diversion-context-bin: CAE=` (`Calibration.rpcContext`), the one
+  header the Maps web app sends on its RPCs; without it the feed answers empty and the gallery
+  answers zero photos, which read for months as bot-gating. See 3.7.
+- (Revived 2026-09-23) Per-photo upload dates come with the `hspqX` reply once it carries the
+  rpcContext header; the `photoDatesRpc` dial now defaults to 1 (0 stops the extra request the
+  full walk makes for the dates join).
 - Review "helpful" counts, which are login-gated to zero for logged-out sessions.
 - EV charger detail (type marker only), the recently-opened badge, and live incidents (Google
   serves binary vector tiles; Waze's feed is reCAPTCHA-gated).
@@ -388,8 +389,14 @@ Two user agents, and confusing them is a bug.
 
 Constraints:
 
-- `secChUa`'s major version must match `userAgent`. `BrowserHeadersTest` locks the compiled
-  pair so bumping one alone fails the build.
+- `secChUa` is DERIVED from `userAgent`'s major (`BrowserHeaders.secChUaFor`, Chromium's own rule
+  from `user_agent_utils.cc`: the GREASE brand's two characters, its version and the brand order
+  are all picked by the major modulo the table sizes). `parseBundle` ignores a pushed `secChUa`
+  whenever the UA names a major; builds from before 2026-09-23 still send the pushed one, so the
+  bundle carries the exact derived string too. `BrowserHeadersTest` pins the rule against real
+  Chrome 120, 124 and 130 headers and the compiled pair against the rule. The hand-edited 153
+  hint carried Chrome 137's GREASE brand (`"Not/A)Brand";v="24"`) where 153 sends
+  `"Not_A Brand";v="8"` in a different order.
 - Both fields are sanitized on parse (`BrowserHeaders.sanitize`): surrounding whitespace is
   trimmed, interior control characters and non-ASCII are rejected back to the compiled
   default. OkHttp throws on a control character at request-build time inside a `runCatching`,
@@ -429,11 +436,90 @@ Constraints:
   variations proto) to Google origins and neither client here does; the WebView and OkHttp keep
   separate cookie jars, so one phone is two sessions from one IP; the two clients differ in the
   TLS and HTTP/2 fingerprints below.
-- Do not chase a TLS fingerprint. Matching Chrome's JA3/JA4 and HTTP/2 frame ordering needs a
-  custom TLS stack, permanent maintenance and native dependencies, and it breaks reproducible
-  F-Droid builds. The defense is diffusion (every user on their own IP), not disguise.
+- Measured 2026-09-23 (tls.peet.ws, `ja4` / `peetprint` / HTTP/2 `akamai_fingerprint`):
+  desktop Chromium 152 on macOS and the Android WebView (Chromium 153) send the SAME ClientHello
+  and the same HTTP/2 settings (`t13d1516h2_8daaf6152771_806a8c22fdea`,
+  `1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`), so a desktop UA over a Chromium stack is
+  coherent. OkHttp is unmistakable: `t13d1513h2_8daaf6152771_eca864cca44a`, no GREASE, no ECH
+  or ALPS, HTTP/2 `4:16777216|16711681|0|m,p,a,s`. Cronet 143 (the newest Chromium-licensed
+  `cronet-embedded` on Maven; the 500.x artifacts carry the SDK license) matches Chromium 153
+  except for three signature algorithms newer Chromium offers (0x0904-0x0906, ML-DSA), which moves
+  its `ja4` to `..._d8a2da3f94cd`.
+- The browser window a request describes is per install (`BrowserViewport`, 2026-09-23): the search
+  and directions `pb` carry the map's pixel size (`!3m2!1i<w>!2i<h>`) and four rectangles the page
+  chrome covers (under `!30m28` in search, `!20m28` in directions), captured from one 1024x768
+  window, and autocomplete claimed 1080x2000. Each install picks one common maximized desktop
+  Chrome viewport once (`browser_viewport` pref, weighted toward 1920x945) and `SearchPb.build`,
+  `DirectionsPb.build` and `suggest` rewrite those fields to it; a recalibrated template without the
+  captured shapes is left untouched. The health probe runs at 1920x945.
+- Every fixed wait before a Google request is drawn through `core/util/Jitter` (+/-25% by
+  default, +/-50% on retry backoffs): the nav recheck, the directions retries, the slim-pool heal,
+  the neighbor prefetch gaps, the photo-load stagger and the review retry. An exact 120 000 ms beat
+  is a rhythm every install would share. OSRM's retry backoff takes the same spread.
+- **Google-host requests go over Cronet (2026-09-23),** Chromium's own network stack, not a
+  custom TLS stack: `core/net/GoogleTransport` hands only google.com hosts to the interceptor the
+  app installs (`app/net/CronetTransport`, calibration `useCronet`, default on); everything else,
+  and any Cronet failure, stays on OkHttp. `cronet-embedded` 143 (Chromium license). Cronet's native
+  library is packaged for arm64-v8a and armeabi-v7a only; on x86 and x86_64 (emulators, a few
+  Chromebooks) the engine fails to load once and Google requests stay on OkHttp. The APK keeps all
+  four ABIs at 108.4 MB, against 98.0 MB before Cronet and 121.9 MB with it on every ABI. Its protobuf-javalite sits beside OsmAnd's old bundled
+  protobuf because `:osmand-shaded` relocates OsmAnd's copy to `net.osmand.shaded.protobuf` at build
+  time (the jar on the `obf-runtime` release is untouched). On a Pixel 9 Google answers it over
+  HTTP/3. Its handshake is Chrome's minus the three newest signature algorithms until the Cronet
+  build tracks Chrome's major (`cronet-build.yml`).
+- **The WebView proxy** (`app/web/WebProxy`, calibration `webProxy`, default OFF): a Google WebView's
+  GETs go out over Cronet, streamed, with the WebView's OWN cookies (`WebViewCookieJar`, so the page
+  keeps its aged session), which removes `X-Requested-With: app.vela`. POSTs reach the proxy through
+  a document-start shim (`WebProxy.SHIM`) that tags each XHR, fetch or sendBeacon with a one-time id
+  and hands its body over a randomly named JS interface; a body that is not plain text (FormData,
+  Blob) still goes out from the WebView with the header. Page telemetry is answered locally with an
+  empty 200. Measured neutral on page timing once the response streams.
+- Every dial can be overridden on a device with `adb shell setprop debug.vela.tune.<key> <n>`
+  (`ui/AppTune`), for testing without a calibration push.
+
+- **Limited-view detection** (`web/GoogleStanding`): the session is marked limited when the first
+  `hspqX` photo page returns at most 20 photos with a next page waiting (50 are asked for; a full
+  session answers 50, a limited one 10), or when "More reviews" on the full reviews page loads
+  nothing; a first page of 40 or more clears it. The mark is keyed to the session's start stamp and
+  reset by any rotation. A missing popular-times chart is not evidence. While marked, a Google place
+  without a chart shows `place_limited_view` where the chart would be, and Settings > Privacy >
+  Google session shows `settings_google_session_limited`.
 
 ### 3.7 Hidden WebView scrapes
+
+**What a place tap loads (2026-09-23).** Photos: one `hspqX` request (`MapDataSource.placePhotos`,
+each photo dated), one jittered ~2.5 s retry when it answers empty (a new Google session's first
+seconds are stripped), and only then the page walk capped at `FIRST_PHOTOS` (6, `early = true`).
+Reviews: the page scrape capped at `FIRST_REVIEWS` (10). The one-request `qv9Egd` feed
+(`reviewFeed`) is behind `nativeReviewFeed` (compiled default 0): Google limits NEW anonymous
+sessions to five reviews and no paging, and the app's native session is new every launch (its
+cookies are in memory), while the WebView's persisted session ages into the full feed. Both RPCs need
+`Calibration.rpcContext` as `x-maps-diversion-context-bin`. The details page loads only when the
+search reply lacks popular times, a review count, an address or weekly hours; a plain focused search
+is tried first only when popular times are already present, because sent plainly it comes back
+without them. "More photos" runs the full walk (Menu tab) with the dates join. No hidden page is
+warmed after a search, and the ambient neighbor prefetch runs in Google-only mode. Settings >
+Performance "Load all photos and reviews" (`FullPlaceLoad`) restores the full walk and 50 reviews.
+Details use ONE plain request of the details page's own search (`MapDataSource.placeDetails`,
+parsed by `PopularTimesParser`) with up to three tries while popular times are missing, the page
+only as a last resort (`nativeDetails`). "More photos" pages `hspqX` natively: 10 per request, the
+cursor is reply payload[5] and goes back at request `[4][2][2]`; payload[1] is not the photo total
+(it reads the same for unrelated places) and is not read. The RPC tags no category, so the Menu tab comes only from the page walk. The per-place requests
+(details, the photo pages, the review feed) carry the `AgedSession` tag, and the Cronet transport
+sends them with the WebView's cookies (`WebViewCookieJar`) instead of the app's (`agedSession`,
+default 1): on the app's new-every-launch session a big-box store's details came back three times
+with a review count and no popular times, which read as "this place has none". That saved session
+is a pseudonymous history, so it is ROTATED (`web/SessionRotation`, Settings > Privacy, pref
+`google_session_rotate`): every week by default, every day, or at every process start, plus a
+"start a new session now" button. A rotation clears the WebView's cookies (off the main thread) and
+site storage (main-thread idle), the Cronet disk cache when the engine has not opened it yet, and
+the WebView HTTP cache when the next Google WebView is built; the button also empties the app's
+in-memory jar (`ResettableCookieJar`). Logcat `VelaSession`. Remote switches: calibration `tuning` `nativePlacePhotos` and `nativeReviewFeed` (1 = on; 0 = the
+page paths). A per-place cache keeps photos and the feed 6 hours and details 15 minutes. "More
+reviews" requests the feed's next page when a reply carries a token at payload[1] (assumed; not
+yet seen in a capture). The method table with the rollback order is in
+`docs/book/07-talking-to-google.md`. Per tap after the session's first details warm: at most the resolve search, one or two photo
+requests, one or two feed requests and one details request, against several hundred before.
 
 Five fetchers plus the visible reviews panel run Google's own JS anonymously, because a
 rendered page is served data a bare request is not. They share `app/web/HiddenWebView`, which
@@ -647,6 +733,15 @@ counter and speaks one cue per stop in order. Reroutes and rechecks fetch with
 `NavSession.setStops` is the one replan entry (`addStop` delegates to it): an unchanged list
 fetches nothing.
 
+The nav step sheet always leads with `NavStopsRow`: with no stops ahead it reads "Edit route" and
+opens the stops editor; with stops it also carries "Remove next", which after a `VelaDialog`
+confirm calls `applyStops(stops.drop(1))`, the same single replan as the editor's Done.
+
+The closing-soon warning (`NavController.maybeWarnClosingSoon`, at nav start) checks each stop
+ahead at its own arrival, the sum of `route.legs` durations up to it, before the destination, and
+speaks only the first place that closes within `60` min of arrival or before it. A stop added
+during the drive is checked against the first leg of the replanned route, waited for up to 20 s.
+
 ### 4.5 Offline routing
 
 `ObfRouteEngine` runs OsmAnd's pure-Java router and binary reader over `.obf` region files.
@@ -754,8 +849,8 @@ BACK_ON_COURSE_HITS             2   consecutive on-route fixes that discard a st
 **Rechecks and faster routes.**
 
 ```
-RECHECK_INTERVAL_MS          120_000
-DEGRADED_RECHECK_INTERVAL_MS  20_000   while the adopted route is degraded
+RECHECK_INTERVAL_MS          120_000   each wait drawn +/-25% (Jitter), redrawn per recheck
+DEGRADED_RECHECK_INTERVAL_MS  20_000   while the adopted route is degraded, same spread
 DEGRADED_FAST_TRIES                6   then back to the normal cadence
 MIN_RECHECK_DISTANCE_M         1_500   stop rechecking near the destination
 FASTER_THRESHOLD_S                90   minimum saving before an alternate is offered
@@ -886,9 +981,11 @@ renderer then sat at 89 percent of a core. The Developer row states the date it 
 - **A paused drive draws the ahead line in `ROUTE_PAUSED_COLOR` (`#9C8AD6`, a muted lavender)**
   and the live traffic color returns on resume. Distinct from the live blue, the congestion amber
   and red and the driven gray, and visible on both themes; a slate gray was tried first and
-  vanished into the dark map's road fill. A route color change re-anchors the split
-  (`splitReset`) the way the trail toggle does, because the ahead line's gradient is only
-  re-uploaded when the cut piece slides; without that only the 400 m around the arrow changed.
+  vanished into the dark map's road fill. A route color change repaints every piece in
+  place (`paintReset`, shared with the trail toggle and new traffic spans), because the ahead
+  line's gradient is otherwise only re-uploaded when the cut piece slides. It never re-anchors the
+  geometry: a paint change applies at once and a GeoJSON upload a few frames later, so new
+  fractions on old pieces paint a strip of the new color behind the arrow.
 
 - The line is inserted **above all road and bridge geometry and below labels**: anchor to the
   first symbol layer after the last `bridge_*` layer, not simply the first symbol layer, which
@@ -972,6 +1069,16 @@ renderer then sat at 89 percent of a core. The Developer row states the date it 
   a missing street name. The pass
   runs once per 400 m quantum of progress or when the upcoming turn targets change, never on a
   short timer, and a quantum is only marked done once something was placed.
+  A passed callout stays on the main layers while it rides down the screen, and is let go when its
+  anchor projects within 28 dp of the nav bar's top edge (`navBarTopPx`) or off either side,
+  checked every `NAV_XLABEL_TICK_MS` (80 ms); `NAV_XLABEL_DROP_BEHIND_M` (600 m past) is the
+  backstop. A let-go callout is drawn by `NAV_ROADLABEL_FADE_LAYER`, a collision-free layer whose
+  constant opacity falls to 0 over `NAV_XLABEL_FADE_MS` (1.2 s); it is filled
+  `NAV_XLABEL_HANDOFF_MS` (250 ms) before the main layers' threshold moves, so a bubble is never
+  absent for a frame. The main layers' filter is a single `atM` threshold, lifted on re-upload
+  over any callout whose street was already let go within 60 m (a re-computed `atM` otherwise
+  brings a passed bubble back). The fade is a constant paint value because a data-driven opacity
+  on the main layers would re-run their placement every tick.
 
 - **A region covers a point by its boundary polygon, not its bounding box.** `assets/region_polys.json`
   (baked by `scripts/region-polys.py` from the Geofabrik `.poly` beside each catalog extract,
@@ -1028,6 +1135,9 @@ widens from fuel-only to `NAV_DRIVE_GROUPS`, and a tap on a place does not selec
   under `dpadMode` where reaching the button takes more presses, and dismisses at zero. It is
   keyed on `navTapOfferTick`, which every offer bumps, because a second tap on the same place
   leaves the state equal and would otherwise leave the first clock running.
+- **A place that is already a stop offers removal.** When the candidate lies within
+  `NAV_STOP_MATCH_M` (60 m) of a stop ahead, the card adds a "Remove stop" button beside "Add stop" (adding the same place again stays
+  possible), which drops the nearest-ahead occurrence of it through `applyStops`.
 - **The offer is drawn on the map**, as a red "+" teardrop (`PoiIcons.CANDIDATE_PIN`) through the
   same effect that draws numbered stops and the destination flag, so the driver can see where the
   offer is before accepting it.
@@ -1066,10 +1176,13 @@ counts rather than a category prior. Offline nothing is hidden.
 The same pass purges closures: an open icon matching a permanently-closed Google listing within
 80 m, with no open listing of that name within 150 m, is added to the persisted closed set.
 
-**OSM basemap business POIs** (`poi_r1`, `poi_r7`, `poi_r20`) are hidden outright under an open
-places source when "OpenStreetMap shops too" (on by default) is turned off, because the three
-open datasets cover businesses far better; with it on, `osmFillIn` drops an OSM business by name
-wherever an open icon already draws it. Everything else OSM draws (museums, attractions, parks, schools, civic
+**OSM basemap business POIs** (`poi_r1`, `poi_r7`, `poi_r20`) are hidden entirely over an archive
+baked with the landmarks (the `placesOneSetRev` dial); over an older archive they still draw, and
+`osmFillIn` drops an OSM business by name wherever an open icon already draws it. The "OpenStreetMap
+shops too" switch that chose between the two was removed on 2026-09-23 (always on for older
+archives): the bake carries OSM's businesses itself. "Parks, schools and civic places" off now also
+drops the `park`, `edu` and `civic` groups from the open layer, which carries them since the
+landmark bake. Everything else OSM draws (museums, attractions, parks, schools, civic
 buildings, places of worship, transit) stays, and `osmFillIn` drops by name only the
 non-business OSM points an open icon of a non-business group already draws within 80 m. That
 pass is viewport-only and rendered-only on both sides, grow-only within a source set (capped at
@@ -1103,13 +1216,17 @@ over Overture Places (public S3 parquet or a local extract) and writes PMTiles.
   24 at z16 (it used to bypass the budget entirely); z17 carries every place. Prominence gains
   `srcbonus` (+0.6 OSM pair, +0.6 chain-locator match, +0.8 Wikidata) and the category prior puts
   food at 2.6 and offices at 0.5.
-  ONE SET (branch places-one-set): OSM landmarks (tourism museum/attraction/gallery/zoo/theme park/
+  ONE SET: OSM landmarks (tourism museum/attraction/gallery/zoo/theme park/
   aquarium/viewpoint, amenity place_of_worship/school/college/university/library/hospital/townhall/
   community_centre/theatre/arts_centre/courthouse/police/fire_station, leisure park/stadium/
   sports_centre/water_park/garden/nature_reserve, historic monument/memorial/castle/ruins/
   archaeological_site; points and polygons) are baked in; `landmark` rows have their own `lrank`
-  budget per 1.6 km cell ordered by notability (size, Wikidata); the app hides `poi_r*` over an
-  archive whose `rev` >= calibration `tuning.placesOneSetRev` (default off).
+  budget per 1.6 km cell ordered by notability (outline size, Wikidata, and the number of languages
+  OSM names it in: 0.6 x log2(1 + languages), capped at 3), which also picks each ~6.5 km cell's
+  z11/z12 anchors; the app hides `poi_r*` over an
+  archive whose `rev` >= calibration `tuning.placesOneSetRev` (compiled default 20260923 since 2026-09-24, the first world bake that carries the landmarks, 448
+  archives; the bundle sets the same value). An archive
+  older than the dial keeps the basemap's points, or its parks would vanish.
   Order of preference: OSM, then the AllThePlaces locator, then Overture's parcel point.
   Tenants never move.
 - **Parks come from OpenStreetMap, so nothing else may filter them out.** The bake drops the park
@@ -2442,9 +2559,19 @@ What the bundle can carry, in increasing power:
 a missing key means the compiled default and adding a dial is a configuration edit. View-layer
 consumers read `CalibrationStore.latest`.
 
+**Daily health check** (`.github/workflows/google-health.yml`, 14:20 UTC and on dispatch):
+`GoogleHealthProbeTest` runs the app's request builders and parsers with the repo's
+`calibration.json` from the Davis fixture (search, directions, directions with avoid-highways,
+autocomplete) and prints `HEALTH|check|OK|BLOCKED|DRIFT|detail`. DRIFT (an answer the parsers
+cannot read, or the avoid flag ignored) fails the run; BLOCKED (403, 429, the sorry page, a
+consent wall: a datacenter IP's treatment) is a warning. `scripts/check-chrome-ua.py` fails the
+same workflow when the Chrome major Vela claims is behind a Windows stable major that has been out
+7 days, or ahead of stable. A failed scheduled run mails the maintainer; nothing is posted.
+Locally: `./gradlew :core:testDebugUnitTest --tests '*GoogleHealthProbeTest' -DvelaLive=true --rerun-tasks`.
+
 Two procedural rules:
 
-- **Adding a `Calibration` field requires wiring `CalibrationStore.parse()` separately.** Fields
+- **Adding a `Calibration` field requires wiring `CalibrationStore.parseBundle()` separately.** Fields
   have shipped unread because only the data class was updated; grep for the field name in
   `CalibrationStore` before assuming a push will land.
 - A fix that needs genuinely new parsing **logic** still ships as a release, unless it can be
@@ -2639,13 +2766,27 @@ tooling default that claims otherwise. Before pushing, `git log origin/main..HEA
   Compose, Hilt, a version catalog, R8 in the `release` build type.
 - **Channels.** A push to `main` or `canary` builds and tests only; a push can never mint a
   release. The nightly prerelease `v0.4.<run>` (versionName `0.4.<run>`, versionCode
-  `2000 + run`) is cut by a daily cron that skips when `main` has not moved, or on demand. Its
+  `(2000 + run) * 10`, `2000 + run` before 2026-09-23) is cut by a daily cron that skips when `main` has not moved, or on demand. Its
   title is `Vela <version> nightly` and its notes open with "Nightly build."; the promotion
   retitles to `Vela <version>` and regenerates the notes, so the channel is readable on the
   release page and in the in-app What's new dialog.
   `canary` is the working branch and also a real update channel: each push replaces the single
   APK on a fixed-tag rolling release whose tag is deliberately not `v0.*`. A weekly workflow
   promotes the newest nightly to stable: same tag, same signed APK, no rebuild.
+- **One APK per chip type (2026-09-23, behind the `ABI_SPLITS` repository variable).** With the
+  variable `true`, CI builds with `-PabiSplits` and a release carries `<prefix>-arm64.apk`,
+  `-armv7.apk`, `-x86.apk`, `-x86_64.apk` and the all-in-one `<prefix>-all.apk` (prefix
+  `vela-maps` or `vela-maps-canary`, `scripts/stage-apks.sh`); without it, the single APK under
+  its old name. Each chip APK adds its digit to the versionCode (armv7 1, arm64 2, x86 3, x86_64
+  4, all-in-one 0), so the F-Droid repo sees distinct codes and moving from the all-in-one APK to a
+  chip APK of the same build is an upgrade. The all-in-one name sorts first because GitHub lists
+  assets by name and updaters older than `update/ApkChoice` take the first `.apk`. The updater
+  picks the file for `Build.SUPPORTED_ABIS` and compares on the legacy `2000 + run` scale
+  (`legacyCode` folds a code of 20000 or more by dividing by ten). The F-Droid workflow renames
+  each release's files by tag, drops the all-in-one APK where chip APKs exist, and pins
+  `CurrentVersionCode` to the stable's highest versionCode read off its APKs. The all-in-one APK
+  leaves Cronet's x86 libraries out (108.4 MB); the per-chip build keeps them (arm64 74.3 MB,
+  armv7 35.4, x86 41.2, x86_64 41.5, all-in-one 121.9).
 - **The run number must stay in `ci.yml`.** A separate workflow would reset the counter and
   regress versionCode. Never name a release `v0.4.0`: the updater's regex takes the run number
   for the version code, so it would read as 2000 and never be offered. Keep local development

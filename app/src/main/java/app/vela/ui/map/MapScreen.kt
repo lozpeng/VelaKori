@@ -583,6 +583,7 @@ fun MapScreen(
     // left the speedo half-covered by the bar (GitHub issue #2). Falls back to the old constant until
     // the first layout pass measures it.
     var navBarHeightPx by remember { mutableStateOf(0) }
+    var navBarTopPx by remember { mutableStateOf(0f) } // the bar's top edge in window px; passed street bubbles fade out above it
     // The step sheet is the nav bar with its list well open: a committing drag hands over the
     // lift (how far the well is already open) and the sheet grows the rest of the way; closing
     // shrinks the well to nothing before the bar takes over again.
@@ -1070,6 +1071,7 @@ fun MapScreen(
             cameraLeftInset = cameraLeftInset,
             topCardBottomPx = topCardBottomPx,
             navBannerBottomPx = navBannerBottomPx,
+            navBarTopPx = navBarTopPx,
             navOverviewTick = navOverviewTick,
             navRecenterTick = navRecenterTick,
             screenHeightPx = screenHeightPx,
@@ -1257,13 +1259,7 @@ fun MapScreen(
         // and until the ticker has reported a puck position.
         val roadLabelMode = app.vela.ui.RoadLabel.mode.value
         if (state.navigating && !pipUi && state.previewStepIndex == null && roadLabelMode != app.vela.ui.RoadLabel.OFF && roadLabelMode != app.vela.ui.RoadLabel.IN_BAR) {
-            val liveIdx = state.nav.stepIndex
-            // The road you are ON right now: the leg's road, or the last silent rename already
-            // passed on it (traveled = leg length minus what is left to the next turn).
-            val onRoad = state.activeRoute?.maneuvers?.getOrNull(liveIdx - 1)?.let { m ->
-                val (name, ref) = m.roadAt(m.distanceMeters - state.nav.distanceToNextManeuver)
-                ref?.takeIf { r -> r.isNotBlank() } ?: name?.takeIf { r -> r.isNotBlank() }
-            }
+            val onRoad = navRoadLabel(state)
             // Composition reads only "do we have a position"; the value itself is read in layout.
             val havePuck = puckScreen.value != null
             if (onRoad != null && (havePuck || roadLabelMode == app.vela.ui.RoadLabel.BAR)) {
@@ -1765,7 +1761,7 @@ fun MapScreen(
                 maxListHeight = if (state.navigating) stepsListMax else null,
                 stopsRow = if (state.navigating) {
                     val labels = vm.navRemainingStopLabels()
-                    if (labels.isEmpty()) null else ({ app.vela.ui.nav.NavStopsRow(labels, onEdit = vm::openStopsEditor) })
+                    ({ app.vela.ui.nav.NavStopsRow(labels, onEdit = vm::openStopsEditor, onRemoveNext = vm::removeNextStop) })
                 } else null,
                 // During nav the sheet wears the bar's own top, so bar -> sheet -> bar is one
                 // surface changing height; the chevron points down and closes.
@@ -1851,6 +1847,7 @@ fun MapScreen(
                     ).joinToString(" · "),
                     onAdd = vm::confirmNavTapStop,
                     onDismiss = vm::dismissNavTapStop,
+                    onRemove = if (vm.navTapCandidateIsStop()) vm::removeNavTapStop else null,
                     // Reaching the button takes more presses on a key-driven phone than a thumb
                     // needs, so the offer waits longer there.
                     autoDismissMs = if (dpadMode) 25_000L else 10_000L,
@@ -1912,7 +1909,7 @@ fun MapScreen(
                                 val stops = vm.navRemainingStops().map { it.location to it.label }
                                 if (r == null || stops.isEmpty()) emptyList() else app.vela.core.nav.RouteStops.legStarts(r, stops)
                             },
-                            stopsRow = if (stopLabels.isEmpty()) null else ({ app.vela.ui.nav.NavStopsRow(stopLabels, onEdit = vm::openStopsEditor) }),
+                            stopsRow = { app.vela.ui.nav.NavStopsRow(stopLabels, onEdit = vm::openStopsEditor, onRemoveNext = vm::removeNextStop) },
                         )
                     },
                     trafficRatio = state.activeRoute?.trafficRatio,
@@ -1920,7 +1917,10 @@ fun MapScreen(
                     onPause = if (navPauseInBar) vm::toggleNavPause else null,
                     // Measured AFTER the padding → the bar surface itself; navBarClearance adds the
                     // padding + gap back. Everything stacked above the bar keys off this.
-                    modifier = Modifier.onGloballyPositioned { navBarHeightPx = it.size.height },
+                    modifier = Modifier.onGloballyPositioned {
+                        navBarHeightPx = it.size.height
+                        navBarTopPx = it.boundsInWindow().top
+                    },
                 )
             }
 
@@ -2084,7 +2084,12 @@ fun MapScreen(
                 reviews = state.reviews,
                 reviewsLoading = state.reviewsLoading,
                 reviewsFound = state.reviewsFound,
+                reviewsLimited = state.reviewsLimited,
+                onMoreReviews = if (state.reviewsNextToken != null) vm::loadMoreReviews else null,
+                reviewsMoreLoading = state.reviewsMoreLoading,
                 photosLoading = state.photosLoading,
+                morePhotos = state.morePhotosFor != null && state.morePhotosFor == state.selected?.featureId,
+                onMorePhotos = vm::loadAllPhotos,
                 detailsLoading = state.loadingDetails,
                 placesHere = state.placesHere,
                 // Ownership-gated: a board renders ONLY on the place it was fetched for. Writers
@@ -2697,7 +2702,7 @@ fun MapScreen(
         // whose height VARIES (lanes, "then" row) — so it hangs off the banner's MEASURED bottom
         // edge, the same navBannerBottomPx the compass uses, and slides with it.
         val downloadingVoiceId = state.voiceDownloadingId
-        val downloadingRegion = state.routingDownloadingId != null || state.poiPackDownloadingId != null
+        val downloadingRegion = state.routingDownloadingId != null || state.poiPackDownloadingId != null || state.regionFileStep != null
         val bareMap = gates.bareMap
         val fasterOffer = state.navigating && state.fasterRoute != null
         if (state.status != null || fasterOffer ||
@@ -2793,7 +2798,12 @@ fun MapScreen(
                         RegionDownloadCard(
                             name = state.regionDownloadName ?: "",
                             places = state.poiPackDownloadingId != null,
-                            pct = if (state.poiPackDownloadingId != null) state.poiPackDownloadPct else state.routingDownloadPct,
+                            fileStep = state.regionFileStep,
+                            pct = when {
+                                state.poiPackDownloadingId != null -> state.poiPackDownloadPct
+                                state.regionFileStep != null -> state.regionFilePct
+                                else -> state.routingDownloadPct
+                            },
                             onCancel = { vm.cancelRegionDownload() },
                         )
                     }
@@ -3517,6 +3527,7 @@ private fun MapSurface(
     cameraLeftInset: Int,
     topCardBottomPx: Int,
     navBannerBottomPx: Int,
+    navBarTopPx: Float,
     navOverviewTick: Int,
     navRecenterTick: Int,
     screenHeightPx: Float,
@@ -3743,6 +3754,7 @@ private fun MapSurface(
         placesPending = state.placesPending,
         placesOneSet = state.placesOneSet,
         osmBusinesses = app.vela.ui.MapPoiPrefs.osmBusinesses.value,
+        hideCivic = !app.vela.ui.MapPoiPrefs.showCivic.value,
         // The exit you are taking, for the green callout on the map: only a numbered exit off
         // a ramp or a fork, and only while its own step is the one being guided.
         navTapPlaces = app.vela.ui.MapPoiPrefs.navTapPlaces.value,
@@ -3782,6 +3794,7 @@ private fun MapSurface(
         transitStops = state.transitStops.filterNot { st -> state.selected?.id == "gtfs:${st.stopId}" },
         onTransitStopTap = vm::onTransitStopTap,
         navBannerBottomPx = if (state.navigating) navBannerBottomPx else 0,
+        navBarTopPx = navBarTopPx,
         // Index into the SHOWN list (the same one ambientMarkersOf uploads), not the raw
         // pool - while a place is open the shown list drops the selected place's copy, so
         // raw-pool indices would be off by one past it.
@@ -4934,7 +4947,7 @@ private fun VoiceDownloadCard(installing: Boolean, pct: Float, onCancel: (() -> 
  *  region's place pack. Mirrors [VoiceDownloadCard] so a Settings-started download stays visible
  *  on the map. */
 @Composable
-private fun RegionDownloadCard(name: String, places: Boolean, pct: Int, area: Boolean = false, onCancel: (() -> Unit)? = null, modifier: Modifier = Modifier) {
+private fun RegionDownloadCard(name: String, places: Boolean, pct: Int, area: Boolean = false, fileStep: Int? = null, onCancel: (() -> Unit)? = null, modifier: Modifier = Modifier) {
     Card(
         modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -4948,6 +4961,8 @@ private fun RegionDownloadCard(name: String, places: Boolean, pct: Int, area: Bo
                     when {
                         area -> stringResource(R.string.map_area_downloading, pct)
                         places -> stringResource(R.string.map_region_places_downloading, name, pct)
+                        fileStep == 1 -> stringResource(R.string.map_region_placesfile_downloading, name, pct)
+                        fileStep == 2 -> stringResource(R.string.map_region_map_downloading, name, pct)
                         else -> stringResource(R.string.map_region_downloading, name, pct)
                     },
                     fontWeight = FontWeight.SemiBold,
@@ -5123,9 +5138,13 @@ private fun FasterRouteCard(
         modifier
             .fillMaxWidth()
             .onFocusChanged { held = it.hasFocus },
+        // The same dress as every other card in the stack (update, downloads, notices) and the
+        // same pair as its own countdown bar (primary on secondaryContainer): it used to be the one
+        // tertiary card with a primary bar inside, which read as a different kind of thing
+        // (user 2026-09-23).
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
         ),
     ) {
         Row(
@@ -5140,22 +5159,19 @@ private fun FasterRouteCard(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            // Explicit contrast pairs, not the button defaults: under Material You the default
-            // TextButton primary and this card's tertiaryContainer both derive from the wallpaper
-            // and routinely land on near-identical pastels - the "No" all but vanished and the
-            // "Switch" fill could blend into the card (user 2026-07-14). onTertiaryContainer is
-            // contrast-guaranteed against tertiaryContainer in every scheme, so the dismiss reads
-            // everywhere, and the confirm wears the inverse fill for the same guarantee.
+            // The dismiss keeps an explicit contrast pair: under Material You a default primary
+            // TextButton can land on the same pastel as the card (the "No" all but vanished,
+            // user 2026-07-14); onSecondaryContainer is guaranteed against secondaryContainer. The
+            // confirm is the app's filled primary pill, like the update card's, in the same color
+            // as the countdown bar under it.
             TextButton(
                 onClick = onDismiss,
-                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onTertiaryContainer),
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSecondaryContainer),
             ) { Text(stringResource(R.string.mapscreen_no)) }
             Button(
                 onClick = onSwitch,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                    contentColor = MaterialTheme.colorScheme.tertiaryContainer,
-                ),
+                shape = CircleShape,
+                modifier = Modifier.dpadHighlight(CircleShape),
             ) { Text(stringResource(R.string.mapscreen_switch)) }
         }
         // INSIDE the card, where every other progress bar in the app sits (user 2026-09-18: the
@@ -5685,15 +5701,28 @@ private fun routeBubblesFor(
     }
 }
 
+/** The road the pill names while navigating: the one you are ON (the leg's road, or the last
+ *  silent rename already passed on it, ref first), else, on an unnamed stretch such as an on- or
+ *  off-ramp, the road it leads onto, the one the next instruction names. The pill used to vanish
+ *  the moment a ramp began (user 2026-09-23), which is exactly when the driver wants to know where
+ *  the lane is taking them. */
+private fun navRoadLabel(state: MapUiState): String? {
+    val mans = state.activeRoute?.maneuvers ?: return null
+    val i = state.nav.stepIndex
+    mans.getOrNull(i - 1)?.let { m ->
+        val (name, ref) = m.roadAt(m.distanceMeters - state.nav.distanceToNextManeuver)
+        (ref?.takeIf { it.isNotBlank() } ?: name?.takeIf { it.isNotBlank() })?.let { return it }
+    }
+    return mans.getOrNull(i)?.let { next -> next.ref?.takeIf { it.isNotBlank() } ?: next.road?.takeIf { it.isNotBlank() } }
+}
+
 /** The road you are on, for the "Inside the bottom bar" road-name placement (issue #553), or null
  *  when that placement is not chosen or there is nothing to show. Same source as the floating
  *  pill: the leg's road, or the last silent rename already passed on it, ref first. */
 private fun barRoadName(state: MapUiState): String? {
     if (app.vela.ui.RoadLabel.mode.value != app.vela.ui.RoadLabel.IN_BAR) return null
     if (!state.navigating || state.previewStepIndex != null) return null
-    val m = state.activeRoute?.maneuvers?.getOrNull(state.nav.stepIndex - 1) ?: return null
-    val (name, ref) = m.roadAt(m.distanceMeters - state.nav.distanceToNextManeuver)
-    val road = ref?.takeIf { it.isNotBlank() } ?: name?.takeIf { it.isNotBlank() } ?: return null
+    val road = navRoadLabel(state) ?: return null
     if (state.roadNameLatin.isEmpty()) return road
     return app.vela.core.voice.SpokenScript.forDisplay(road, app.vela.ui.AppLocale.effective().language, state.roadNameLatin)
 }

@@ -285,32 +285,32 @@ abstract class PmtilesRegionStore(
      *  manifest region covering it. One, not every match: regions nest (a city test box inside its
      *  state), and two archives on the style drew every business in the overlap twice. An installed
      *  archive with no index entry (a dropped-in test file) counts as covering everything. */
-    /** The bake date (`rev`, YYYYMMDD) of the archive [sourcesFor] last picked, 0 when unknown. The
-     *  app hides the basemap's own points only over an archive baked with the one-set bake. */
-    @Volatile var lastPickRev: Int = 0
-        private set
+    /** What [sourcesFor] picked: the source URIs and the picked archive's bake date (`rev`, YYYYMMDD,
+     *  0 when unknown). The app hides the basemap's own points only over an archive baked with the
+     *  one-set bake. Returned together because two camera-idle lookups can overlap, and a shared
+     *  "last picked" field let one lookup read the other's answer. */
+    data class Pick(val uris: List<String>, val rev: Int)
 
-    suspend fun sourcesFor(center: LatLng?, manifestUrl: String): List<String> {
+    suspend fun sourcesFor(center: LatLng?, manifestUrl: String): Pick {
         val local = installed()
-        lastPickRev = 0
-        val c = center ?: return local.entries.take(1).map { (id, f) -> lastPickRev = installedRev(id); "pmtiles://file://${f.absolutePath}" }
+        val c = center ?: return local.entries.firstOrNull()
+            ?.let { (id, f) -> Pick(listOf("pmtiles://file://${f.absolutePath}"), installedRev(id)) } ?: Pick(emptyList(), 0)
         val index = readIndex()
         val localPick = local.entries
             .filter { (id, _) -> index[id]?.let { b -> c.lat in b[0]..b[2] && c.lng in b[1]..b[3] } ?: true }
             .minByOrNull { (id, _) -> index[id]?.let { b -> (b[2] - b[0]) * (b[3] - b[1]) } ?: Double.MAX_VALUE }
-        if (localPick != null) { lastPickRev = installedRev(localPick.key); return listOf("pmtiles://file://${localPick.value.absolutePath}") }
+        if (localPick != null) return Pick(listOf("pmtiles://file://${localPick.value.absolutePath}"), installedRev(localPick.key))
         val streamed = runCatching { manifest(manifestUrl) }.getOrDefault(emptyList())
             .filter { it.covers(c) }
-            .minByOrNull { it.area() } ?: return emptyList()
-        lastPickRev = streamed.rev
-        return listOf("pmtiles://${streamed.url}")
+            .minByOrNull { it.area() } ?: return Pick(emptyList(), 0)
+        return Pick(listOf("pmtiles://${streamed.url}"), streamed.rev)
     }
 
     /** Download [region]'s archive for offline use. True when installed (or already was). */
     /** [replace] downloads a fresh copy over an installed archive: the new file lands in `.tmp` and
      *  is renamed over the old one only when complete and verified, so a failed or canceled update
      *  leaves the region as it was (the Update button used to delete first, 2026-09-22). */
-    suspend fun download(region: Region, replace: Boolean = false, onProgress: (Int) -> Unit): Boolean = withContext(Dispatchers.IO) {
+    suspend fun download(region: Region, replace: Boolean = false, active: () -> Boolean = { true }, onProgress: (Int) -> Unit): Boolean = withContext(Dispatchers.IO) {
         downloadMutex.withLock {
             if (!replace && fileFor(region.id).exists()) { onProgress(100); return@withLock true }
             root.mkdirs()
@@ -326,6 +326,7 @@ abstract class PmtilesRegionStore(
                         tmp.outputStream().use { out ->
                             val buf = ByteArray(64 * 1024)
                             while (true) {
+                                if (!active()) error("canceled")
                                 val n = input.read(buf)
                                 if (n < 0) break
                                 out.write(buf, 0, n)

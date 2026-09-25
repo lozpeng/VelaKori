@@ -20,6 +20,7 @@ import javax.inject.Inject
 @HiltAndroidApp
 class VelaApp : Application(), coil.ImageLoaderFactory {
     @Inject lateinit var diag: DiagLog
+    @Inject lateinit var http: okhttp3.OkHttpClient
 
     /** Coil with a HARD memory-cache cap. The default budget is ~25% of the app's heap CLASS,
      *  and largeHeap makes that class huge - on a 512 MB large heap Coil happily retains up to
@@ -61,10 +62,29 @@ class VelaApp : Application(), coil.ImageLoaderFactory {
         super.onCreate()
         // Device memory class first: the Coil cap and the eager-warm decisions read it.
         app.vela.ui.MemoryPressure.init(this)
+        app.vela.ui.SpeechPreload.init(this) // after MemoryPressure: its default reads the RAM tier
+        app.vela.ui.FullPlaceLoad.init(this)
+        // Google-host requests over Chrome's network stack (Cronet), built lazily on the first one.
+        // Calibration `useCronet` 0, or an engine that fails to build, leaves them on OkHttp.
+        // Before Cronet opens its cache: a due rotation deletes it (Settings > Privacy).
+        app.vela.web.SessionRotation.init(this)
+        app.vela.web.GoogleStanding.init(this)
+        app.vela.web.SessionRotation.appJar = http.cookieJar as? app.vela.core.di.ResettableCookieJar
+        app.vela.net.CronetHolder.init(this)
+        app.vela.core.net.GoogleTransport.interceptor = app.vela.net.CronetTransport(http.cookieJar, app.vela.web.WebViewCookieJar())
         // Push the device class down to :core, which cannot read an :app holder (same seam as
         // CategoryFilter.enabled). Gates the ambient POI fan-out in GoogleMapsDataSource.
         app.vela.core.data.LowRamMode.enabled = app.vela.ui.MemoryPressure.lowRam
         Units.init(this)
+        // The desktop window size Google's requests describe: picked once per install, then kept
+        // (a size that changed per launch would be its own oddity). See BrowserViewport.
+        run {
+            val p = getSharedPreferences("vela_settings", MODE_PRIVATE)
+            val idx = p.getInt("browser_viewport", -1).takeIf { it >= 0 }
+                ?: kotlin.random.Random.nextInt(app.vela.core.data.google.BrowserViewport.CHOICES.size).also { p.edit().putInt("browser_viewport", it).apply() }
+            val (w, h) = app.vela.core.data.google.BrowserViewport.choice(idx)
+            app.vela.core.data.google.BrowserViewport.set(w, h)
+        }
         app.vela.ui.Clock24.refresh(this) // the 12/24-hour clock setting (issue #357); MainActivity refreshes it on resume
         AppTheme.init(this)
         DynamicColor.init(this)

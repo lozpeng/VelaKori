@@ -66,6 +66,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material3.Surface
 import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
@@ -251,7 +252,15 @@ fun PlaceSheet(
     reviews: List<Review> = emptyList(),
     reviewsLoading: Boolean = false,
     reviewsFound: Int = 0,
+    /** Google served its limited view (a short review list): the tab says so. */
+    reviewsLimited: Boolean = false,
+    /** The native feed has a next page: the list ends in "More reviews". Null = no button. */
+    onMoreReviews: (() -> Unit)? = null,
+    reviewsMoreLoading: Boolean = false,
     photosLoading: Boolean = false,
+    /** The strip holds the first batch only: end it with a "More photos" tile. */
+    morePhotos: Boolean = false,
+    onMorePhotos: () -> Unit = {},
     detailsLoading: Boolean = false,
     placesHere: List<Place> = emptyList(),
     /** The tapped label is still being looked up on Google: skeletons stand in for the details,
@@ -728,6 +737,27 @@ fun PlaceSheet(
                                 .dpadHighlight(RoundedCornerShape(12.dp))
                                 .clickable { galleryStart = i },
                         )
+                    }
+                    // First batch only (a place tap stops the gallery walk at a handful): the rest is
+                    // one tap away, and costs Google contact only when someone wants it.
+                    if (morePhotos && !photosLoading && place.photoUrls.isNotEmpty()) {
+                        item(key = "more") {
+                            Box(
+                                Modifier
+                                    .size(width = 110.dp, height = 110.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(dim.copy(alpha = 0.12f))
+                                    .dpadHighlight(RoundedCornerShape(12.dp))
+                                    .clickable(onClick = onMorePhotos),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Icon(Icons.Default.PhotoLibrary, contentDescription = null, tint = dim)
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(stringResource(R.string.place_more_photos), style = MaterialTheme.typography.labelLarge, color = ink)
+                                }
+                            }
+                        }
                     }
                     // The full gallery scrapes in the background a beat after the sheet opens —
                     // pulse placeholder tiles so it reads as "more photos loading", not "done".
@@ -1210,6 +1240,18 @@ fun PlaceSheet(
                     Text(stringResource(R.string.place_loading_popular_times), style = MaterialTheme.typography.bodySmall, color = dim)
                 }
             }
+            // Google is giving this session its limited view (web/GoogleStanding): say so where the
+            // chart would be, so a missing chart reads as Google's doing and not a broken app.
+            if (place.popularTimes == null && !detailsLoading && place.featureId != null && app.vela.web.GoogleStanding.limited.value) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 12.dp),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    Icon(androidx.compose.material.icons.Icons.Default.Info, contentDescription = null, tint = dim, modifier = Modifier.size(16.dp).padding(top = 2.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.place_limited_view), style = MaterialTheme.typography.bodySmall, color = dim)
+                }
+            }
             // (The editorial summary + "From the owner" blurb live in the About tab.)
 
             // Other Google listings at the same spot (a co-branded shop's duplicate
@@ -1266,7 +1308,7 @@ fun PlaceSheet(
             // The reviews tabs wait for the listing (the map's data has no reviews to show, and an
             // empty tab row would read as "no reviews"); pulse bars hold their place.
             if (resolving) SheetSkeleton(dim, listOf(260.dp, 220.dp, 240.dp), gap = 18.dp, top = 18.dp)
-            else PlaceTabs(place, reviews, reviewsLoading, reviewsFound, onRetryReviews, ink, dim, onPanelOverscroll, onPanelOverscrollEnd, onPanelEngaged, reviewsEngaged.value)
+            else PlaceTabs(place, reviews, reviewsLoading, reviewsFound, onRetryReviews, ink, dim, onPanelOverscroll, onPanelOverscrollEnd, onPanelEngaged, reviewsEngaged.value, reviewsLimited = reviewsLimited, onMoreReviews = onMoreReviews, reviewsMoreLoading = reviewsMoreLoading)
             }
             }
             }
@@ -3444,6 +3486,9 @@ private fun PlaceTabs(
     onPanelOverscrollEnd: (Float) -> Unit = {},
     onPanelEngaged: () -> Unit = {},
     panelEngaged: Boolean = false,
+    reviewsLimited: Boolean = false,
+    onMoreReviews: (() -> Unit)? = null,
+    reviewsMoreLoading: Boolean = false,
 ) {
     // A BARE bus stop (transit-category AND no rating, i.e. no real review content) shows only its
     // departure board + stop timeline - Reviews/About are noise there. But a RATED transit CENTER
@@ -3524,6 +3569,9 @@ private fun PlaceTabs(
                         onReadAll = if (app.vela.ui.LiveReviews.on.value && !app.vela.ui.GoogleFree.on.value && fid != null && fid.contains(":")) {
                             { showFullPanel = true }
                         } else null,
+                        limited = reviewsLimited,
+                        onMoreReviews = onMoreReviews,
+                        moreLoading = reviewsMoreLoading,
                     )
                     reviewPhotos?.let { (urls, caps, start) ->
                         PhotoGallery(urls, caps, start) { reviewPhotos = null }
@@ -3639,6 +3687,9 @@ private fun ReviewsTab(
     dim: Color,
     onPhotoTap: (List<String>, Int, String?) -> Unit = { _, _, _ -> },
     onReadAll: (() -> Unit)? = null,
+    limited: Boolean = false,
+    onMoreReviews: (() -> Unit)? = null,
+    moreLoading: Boolean = false,
 ) {
     // Search within the loaded reviews (author or text, case-insensitive). Resets per place.
     var reviewQuery by remember(place.id) { mutableStateOf("") }
@@ -3683,6 +3734,16 @@ private fun ReviewsTab(
         }
         // Entry to the full-screen live Google reviews — all of them, plus Google's own SORT and
         // server-side search. The label says so (the button used to just say "Read all").
+        // Google's limited view (issue #602): a short list and no more pages for this session or
+        // network. Say so, so a short list does not read as a broken sheet.
+        if (limited && !loading) {
+            Text(
+                stringResource(R.string.place_reviews_limited),
+                style = MaterialTheme.typography.bodySmall,
+                color = dim,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
         onReadAll?.let { open ->
             // Tonal pill, matching the sheet's action language, with the LOCAL search folded
             // into a circled magnifier beside it (progressive disclosure — see reviewSearchOpen).
@@ -3828,6 +3889,16 @@ private fun ReviewsTab(
                     )
                 } else {
                     shown.forEach { ReviewRow(it, ink, dim, onPhotoTap, q) }
+                    // The feed said there is a next page: one request, appended (no page load).
+                    if (onMoreReviews != null && q.isEmpty()) {
+                        if (moreLoading) {
+                            LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 12.dp))
+                        } else {
+                            TextButton(onClick = onMoreReviews, modifier = Modifier.fillMaxWidth().dpadHighlight(RoundedCornerShape(8.dp))) {
+                                Text(stringResource(R.string.place_more_reviews))
+                            }
+                        }
+                    }
                 }
             }
         }
