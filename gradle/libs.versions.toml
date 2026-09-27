@@ -1,8 +1,8 @@
 [versions]
 # 来自 versions1 的版本定义
-agp = "9.1.0"
-kotlin = "2.3.20"
-ksp = "2.3.6"   # 升级：匹配 Kotlin 2.3.20 的 KSP2 版本
+agp = "9.4.1"
+kotlin = "2.4.20"
+ksp = "2.3.12"   # 升级：匹配 Kotlin 2.3.20 的 KSP2 版本
 kotlinxImmutable = "0.4.0"
 androidxActivity = "1.13.0"
 androidxCore = "1.17.0"
@@ -78,6 +78,7 @@ maplibre = "13.6.1"
 rhino = "1.7.14"
 androidxWebkit = "1.17.0"
 coil2 = "2.7.0"
+kotlinMetadataJvm = "2.4.20"
 
 [libraries]
 # 来自 versions1 的库
@@ -196,7 +197,7 @@ androidx-uiautomator = { group = "androidx.test.uiautomator", name = "uiautomato
 androidx-benchmark-macro = { group = "androidx.benchmark", name = "benchmark-macro-junit4", version.ref = "benchmarkMacro" }
 androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
 
-
+kotlin-metadata-jvm = { group = "org.jetbrains.kotlin", name = "kotlin-metadata-jvm", version.ref = "kotlinMetadataJvm" }
 [plugins]
 # 来自 versions1 的插件（已移除 kotlin-android，AGP 9.0 内置 Kotlin）
 android-application = { id = "com.android.application", version.ref = "agp" }

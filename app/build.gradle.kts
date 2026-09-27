@@ -263,6 +263,7 @@ dependencies {
 
     implementation(libs.hilt.android)
     implementation(libs.hilt.navigation.compose)
+    ksp(libs.kotlin.metadata.jvm)
     ksp(libs.hilt.compiler)
 
     implementation(libs.coil.compose)
