@@ -196,7 +196,7 @@ data class MapUiState(
     val photosLoading: Boolean = false, // the lazy WebView gallery scrape is in flight (more photos coming)
     /** Feature id whose photo strip holds only the FIRST BATCH: the sheet offers "More photos". */
     val morePhotosFor: String? = null,
-    /** Cursor for the next native gallery page ("More photos" = one request of 10). */
+    /** Cursor for the next native gallery page ("More photos" = one request of 50; a limited session gets 10). */
     val photosNextToken: String? = null,
     val loadingDetails: Boolean = false, // the lazy WebView detail fetch (popular times etc.) is in flight
     val routes: List<Route> = emptyList(),
@@ -489,9 +489,9 @@ class MapViewModel @Inject constructor(
 
     init {
         loadAmbientCacheFromDisk() // ambient LRU survives restarts (paint-then-refine)
-        warmWebViewsWhenQuiet() // boot the hidden WebViews at a quiet moment, not at the first place tap
+        warmWebViewsWhenQuiet() // boot the WebView ENGINE at a quiet moment (no Google page), not at the first place tap
         loadOpenPlaceLinks() // Overture -> Google links remembered from earlier sessions
-        // Privacy toggle (Settings -> Data & privacy): periodic in-drive traffic re-checks send
+        // Privacy toggle (Settings -> Navigation, live re-checks): periodic in-drive traffic re-checks send
         // the CURRENT position to Google; the opt-out lives on the session so :core enforces it.
         // (Raw prefs read: the settingsPrefs property is declared below this init block.)
         navSession.liveRechecks = appContext
@@ -2951,7 +2951,7 @@ class MapViewModel @Inject constructor(
      *  ([WebPhotoFetcher]) and swap it in for the search response's ~1-photo preview.
      *  Sets [MapState.photosLoading] while in flight so the sheet can show "more coming".
      *  Best-effort: an empty/failed scrape leaves the preview untouched (no regression). */
-    /** "More photos": the next gallery page, one request of 10 (2026-09-23). When the first batch
+    /** "More photos": the next gallery page, one request of 50 (a limited session gets 10; 2026-09-23). When the first batch
      *  came from the page walk instead (the RPC gave nothing), it walks the whole gallery. */
     fun loadAllPhotos() {
         val st = _state.value
@@ -3269,10 +3269,10 @@ class MapViewModel @Inject constructor(
             // answers a plain request with Calibration.rpcContext. The hidden page scrape (a whole
             // Google web app plus a feed request per scroll) is the fallback, and the full load.
             // OFF by default (2026-09-23, measured on a healthy Pixel 9): Google serves NEW anonymous
-            // sessions its limited view, and the app's own session is new every launch (in-memory
-            // cookies), so the feed answered 5 reviews there while the same phone's weeks-old WebView
-            // session gets the full list. The page scrape (capped at 10) rides that aged session.
-            // `nativeReviewFeed` 1 turns this one-request path on once the app's session persists.
+            // sessions its limited view. The feed now rides the WebView's aged session (aged = true)
+            // and still answered 0 reviews there on 2026-09-24, while the page scrape (capped at 10)
+            // on that same session gets the full list. `nativeReviewFeed` 1 turns this path on once
+            // a capture shows the feed answering in full.
             if (!fullLoad && tuneOn("nativeReviewFeed", default = false)) {
                 val cached = placeCacheGet(feedCache, fid, REVIEWS_CACHE_MS)
                 var feed = cached ?: runCatching { dataSource.reviewFeed(fid, app.vela.web.WebReviewsFetcher.reviewsHl()) }.getOrNull()
@@ -4166,9 +4166,10 @@ class MapViewModel @Inject constructor(
 
     /** Tap on a house-number LABEL (the map's own `addr:housenumber` or the address overlay's
      *  `number`). Unlike a long-press we KNOW the number the user aimed at, so we LEAD the pin with
-     *  that exact number and use the reverse-geocode only for the street/city — otherwise Google's
-     *  reverse-geocode can snap to a neighbor (tapped 1020, got 1040), which is exactly the "doesn't
-     *  snap to the house number" complaint. A real business sitting on the point still wins. */
+     *  that exact number and use the reverse geocode (Nominatim) only for the street/city, since a
+     *  reverse geocode can snap to a neighbor (tapped 1020, got 1040), which is exactly the "doesn't
+     *  snap to the house number" complaint. Nothing here asks Google (the old "a real business at
+     *  the spot wins" branch dated from Google's reverse geocode and was removed 2026-09-25). */
     fun onAddressLabelTap(number: String, location: LatLng, tileStreet: String? = null) {
         if (_state.value.navigating) return // dead during a live drive, like onPoiTap
         if (_state.value.pickOnMap != null) { onMapLongPress(location); return } // pick-mode reuses the endpoint flow
@@ -4202,8 +4203,6 @@ class MapViewModel @Inject constructor(
             val geo = runCatching { dataSource.reverseGeocode(location) }.getOrNull()
             val place = when {
                 geo == null -> immediate.copy(address = number)
-                // A real POI (has a rating/category) at that spot — show it, the user gets the business.
-                geo.rating != null || geo.category != null -> geo
                 else -> {
                     val base = geo.address ?: geo.name
                     if (base.any { it.isLetter() }) {

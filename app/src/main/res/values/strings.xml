@@ -127,9 +127,12 @@
     <string name="exp_chooser_share_text" translatable="false">Directions to %1$s: %2$s, %3$s</string>
     <string name="settings_flock_route_alert" translatable="false">Avoid surveillance cameras</string>
     <string name="settings_flock_detour" translatable="false">Try side streets around cameras</string>
-    <string name="settings_flock_detour_hint" translatable="false">When every route still passes cameras, tries a point just off the road at each camera and routes through it, the way you would by long-pressing the map. A route that passes fewer cameras within the same small detour goes to the top of the list. Costs a few extra route requests per trip. Off by default.</string>
+    <string name="settings_flock_detour_hint" translatable="false">When the top route still passes cameras, tries a point just off the road at each camera and routes through it, the way you would by long-pressing the map. A route that passes fewer cameras within the same small detour goes to the top of the list. Costs a few extra route requests per trip. Off by default.</string>
     <string name="settings_flock_route_alert_hint" translatable="false">Counts the license-plate reader (Flock) cameras on each route (a camera aimed across the road is left out, since it reads cross traffic) and auto-picks a lower-camera one when it costs only a little longer. It never sends you far out of the way, so where cameras are unavoidable it just shows the counts and leaves the choice to you. Long-press the map to route through a point yourself. Off by default.</string>
-    <string name="dir_cameras_on_route" translatable="false">%1$d cameras on this route</string> <!-- format -->
+    <plurals name="dir_cameras_on_route" translatable="false">
+        <item quantity="one">%1$d camera on this route</item>
+        <item quantity="other">%1$d cameras on this route</item>
+    </plurals>
 
     <string name="settings_read_all_reviews">“Read all reviews” button</string>
     <string name="settings_read_all_reviews_hint">Adds a “Read all reviews” button that opens Google\'s full reviews page inside the app, with every review. Off = Vela\'s own review list only.</string>
@@ -267,6 +270,8 @@
     <string name="nav_stops_remove_action">Remove</string>
     <string name="nav_stop_offer_remove">Remove stop</string>
     <string name="settings_google_session">Google session</string>
+    <string name="settings_block_google_telemetry">Block Google\'s page telemetry</string>
+    <string name="settings_block_google_telemetry_hint">Google\'s pages report on themselves: logging pings and the account bar\'s background calls. Nothing Vela shows needs them. They go out by default because a browser that never sends them looks less like a person to Google, and that is part of what decides whether your session gets the limited view. Turn this on to answer them on the phone instead.</string>
     <string name="settings_google_session_limited">Right now Google is giving this phone a limited view: fewer photos per page, no popular times on some places, and More reviews loads nothing. It usually lifts on its own after a while. A brand-new session starts out limited too, so starting one rarely helps.</string>
     <string name="place_limited_view">Google is showing a limited view right now, so popular times and more reviews may be missing here.</string>
     <string name="settings_google_session_hint">Google remembers this phone by a cookie, so what Vela looks up while it lasts can be linked together, without any name or account. Starting a new one caps that. A new session gets a shorter view from Google for a while (fewer reviews, popular times missing on some places).</string>
@@ -848,7 +853,7 @@
     <string name="settings_voice_volume_louder">Louder</string>
     <string name="settings_voice_volume_loudest">Loudest</string>
     <string name="settings_voice_volume_hint">How loud spoken directions play over your media. Louder tiers apply to the Vela voice; system voices can only be made softer.</string>
-    <string name="place_avoid_not_honored">These routes may still use tolls, highways, or ferries. Vela can avoid them on a direct trip online, or offline in a downloaded area, but not yet on a trip with stops.</string>
+    <string name="place_avoid_not_honored">These routes may still use tolls, highways, or ferries: Google could not be reached to route around them, and the open router cannot. In a downloaded area Vela avoids them offline.</string>
     <string name="settings_lists_export_hint">Back up your lists to a file, or restore them on another device.</string>
     <string name="settings_lists_imported">Imported %1$d list(s)</string>
     <string name="settings_places_imported">Imported %1$d place(s)</string> <!-- format -->
@@ -1069,4 +1074,9 @@
     <string name="settings_nav_tap_places">Tap places while driving (experiment)</string>
     <string name="settings_nav_tap_places_hint">While navigating, fuel, food and charging places stay on the map and tapping one offers it as a stop; a second tap adds it. Off by default, since nav hides places to keep the map readable. Turning this on also turns on Show places.</string>
     <string name="mapvm_start_from_here">Starting from where you are</string>
+    <string name="place_busy_not">Not busy</string>
+    <string name="place_busy_not_too">Not too busy</string>
+    <string name="place_busy_little">A little busy</string>
+    <string name="place_busy_usually">Usually busy</string>
+    <string name="place_busy_very">Very busy</string>
 </resources>

@@ -50,7 +50,7 @@ standing instruction from the repo's owner.
 
 **All three rules are CHECKED now (2026-09-18):** `scripts/check-writing.sh [range]` fails on AI
 attribution in a commit message, on a British spelling in a commit message or in what the change
-adds (the both-spellings keyword lists and values-en-rGB are excluded), and on an em dash in what
+adds (the both-spellings keyword lists and every translation folder, `values-*`, are excluded: a French or German word is not a British spelling), and on an em dash in what
 the change ADDS (added lines only, so the
 repo's older ones do not fail every edit), and the Location guard workflow runs it on every push and
 PR. The em-dash half covers issue comments, PR bodies and release notes too, which no workflow can
@@ -194,8 +194,8 @@ Defaults that make the safe path the easy one:
   `WebView(appContext).destroy()`): it used to load google.com and Google Maps in two hidden views
   at every launch, ~300 MB of renderer (the web view process measured 635 MB at 15 s on the 4a,
   155 MB after) plus a Google contact carrying the package name, for pages nobody asked for. The
-  Google pages load in `warmPlaceWebViews` when a search lands, and never on a `modest` phone. On a resolved tap the photos and popular-times loads start 700 ms after the
-  reviews scrape, so three page loads do not hit the 4a together under the animation.
+  search-time page warm (`warmPlaceWebViews`) is gone too since 2026-09-23: a tap's photos and
+  details are single requests, and a hidden page loads only when a place needs one.
 - `./gradlew :core:test` runs the pure-logic unit tests (polyline, nav engine).
 - **MapScreen is at the JVM 64 KB method limit (2026-09-13).** CI builds release only; the
   DEBUG variant (what the 4a runs) carries Compose source info and failed with "Method too
@@ -298,7 +298,7 @@ Defaults that make the safe path the easy one:
   trims to nothing drops its `RD` and `M` lines too, or `TripLog.parse` folds them into the
   previous block. The share dialog computes the report in a `LaunchedEffect` on IO, not in
   `remember` on the main thread.
-- **Demo / simulate-driving mode** (Settings → Navigation, off by default, pref `demo_drive` in
+- **Demo / simulate-driving mode** (Settings → Diagnostics, off by default, pref `demo_drive` in
   `vela_settings`). Drives a planned route as a SYNTHETIC GPS trace so nav can be shown/tested
   **anywhere** with no real fix - this is how the Davis `docs/screenshots/05-navigation.png` was shot
   while the phone was elsewhere. `DemoTrace.fromRoute(polyline)` (pure `:core`) → one clean
@@ -307,7 +307,7 @@ Defaults that make the safe path the easy one:
   replay: `MapUiState.demoDriving` hides the "Stop replay" pill and the normal **End** (`stopNav`)
   cancels the demo job (its `finally` resumes live GPS + resets the dot/route). **Turn it OFF to
   navigate for real** - while on, every "Start" simulates instead of using GPS.
-- **Simulate-my-location (demo)** (`ui/SimLocation.kt`, Settings → Navigation, off by default,
+- **Simulate-my-location (demo)** (`ui/SimLocation.kt`, Settings → Diagnostics, off by default,
   pref `sim_location` in `vela_settings`). BOTH sim entry points CANCEL the stale-location timer
   (2026-07-09): the pinned demo dot gets no fresh fixes, so a timer armed by the last real fix
   grayed the dot ~30 s in and nothing ever turned it blue again. The sim branch in `startLocation()`
@@ -465,8 +465,8 @@ Defaults that make the safe path the easy one:
   when it finishes, which on a real phone wipes saved places, trips and permission grants (it did
   once, 2026-07-16, on the wired test phone). `.github/workflows/baseline-profile.yml` (monthly cron
   + dispatch) regenerates on a KVM emulator and opens a PR when the profile drifts.
-- Toolchain: AGP 8.7.3, Kotlin 2.1.0, Gradle
-  8.11.1, compileSdk 35, minSdk 26, Java 17, Compose + Hilt + version catalog.
+- Toolchain: AGP 8.10.1, Kotlin 2.1.0, Gradle
+  8.11.1, compileSdk 36 (`:app`; `:core` 35), targetSdk 35, minSdk 26, Java 17, Compose + Hilt + version catalog.
 - Release signing from env: `VELA_KEYSTORE_PATH` / `VELA_KEYSTORE_PASSWORD` /
   `VELA_KEY_ALIAS` (default alias `vela`); falls back to debug keystore locally.
 - **No blocking IPC/IO from a composable body.** `SettingsScreen` used to call
@@ -578,9 +578,9 @@ Defaults that make the safe path the easy one:
 - `:core` is the UI-agnostic "extractor" (NewPipeExtractor pattern). `:app` is
   the Compose UI. Don't let MapLibre or Android UI types leak into `:core`
   (convert `LatLng` at the view boundary).
-- The one seam is `core/data/MapDataSource`. `MockMapDataSource` is the default
-  and keeps the entire app usable offline; `google/GoogleMapsDataSource` is the
-  real scraper.
+- The one seam is `core/data/MapDataSource`. `google/GoogleMapsDataSource` is the
+  real scraper and the one bound (`VelaConfig.USE_GOOGLE_SOURCE = true`); `MockMapDataSource`
+  remains for tests and demos.
 - **Android Auto (`app/car/`).** `VelaCarAppService` is a NAVIGATION-category templated
   `CarAppService` (manifest service + `xml/automotive_app_desc.xml` `<uses name="template"/>` + the
   `androidx.car.app.*` permissions + `minCarApiLevel=1`); a sideload appears in the car launcher only
@@ -1444,8 +1444,12 @@ Defaults that make the safe path the easy one:
   `ogads-pa`. So the proxy now (a) carries Google POSTs through a document-start shim
   (`WebProxy.SHIM`, XHR/fetch/sendBeacon tag the URL with a one-time id and hand the body to a JS
   interface whose NAME and tag parameter are random per process, because a fixed "VelaPost" would be
-  readable by Google's own page script) and (b) answers the telemetry locally with a CORS-friendly
-  200 (`webProxyBlockLogs`; an intercepted 204 lost its CORS headers on a 4a). Log lines: `carries:` / `answers locally:` / `passes through:`. The scrapers'
+  readable by Google's own page script) and (b) can answer the telemetry locally with a CORS-friendly
+  200 (an intercepted 204 lost its CORS headers on a 4a). Since 2026-09-25 (b) is a SETTING, off by
+  default: Settings > Privacy "Block Google's page telemetry" (`web/GoogleTelemetry`, pref
+  `block_google_telemetry`, works with the proxy on or off; the `webProxyBlockLogs` dial still
+  overrides when set). Telemetry flows by default because a browser that never sends it looks less
+  like one, and session standing is what decides the limited view. Log lines: `carries:` / `answers locally:` / `passes through:`. The scrapers'
   own bridges are random per process too since 2026-09-23 (`web/JsNames`): scripts keep writing
   `VelaBridge` / `VelaPanel` and `JsNames.of` swaps the real names in at every
   `evaluateJavascript`, so a new script call must go through `JsNames.of` or its bridge calls fail.
@@ -1504,7 +1508,7 @@ Defaults that make the safe path the easy one:
   makes a re-tap free; "More reviews" follows the feed's next-page token, which is ASSUMED to sit at
   payload[1] and has not been seen in a capture yet (every capture was an end-of-list reply).
 - **Place-content toggles (2026-07-08):** `ShowReviews` / `LoadPhotos` reactive holders
-  (`ui/PlaceContent.kt`, same shape as `LiveReviews`, init in VelaApp, rows in Settings → Map).
+  (`ui/PlaceContent.kt`, same shape as `LiveReviews`, init in VelaApp, rows in Settings → Places).
   They gate BOTH fetch (`fetchReviews`/`fetchPhotos` first line) and render (PlaceSheet `hasReviews`
   + the photo-hero `if`), so off = zero scrape traffic. Keep any new review/photo surface behind them.
 - **The sheet's LAYOUT MUST NOT MOVE while it loads (user 2026-09-18).** The photo strip and the
@@ -1565,9 +1569,9 @@ Defaults that make the safe path the easy one:
   15 requests; (2) `prefetchAmbientNeighbors` warms the 4 view-sized neighbor areas
   into the ambient LRU after each idle fetch - UNMETERED network only (4 extra fan-outs),
   sequential with 700 ms gaps, skips cached areas, bails on any non-bare-map state; (3)
-  the ambient LRU PERSISTS to `ambient_cache.json` (newest 8 areas x 200 slim places via
+  the ambient LRU PERSISTS to `ambient_cache.json` (newest 32 areas x 200 slim places, 14-day TTL, via
   :core `AmbientDiskCache` - the app module stays OUT of kotlinx.serialization, the same
-  boundary TransitParser keeps; 24 h validity, loaded stamps read as fresh because the
+  boundary TransitParser keeps; loaded stamps read as fresh because the
   moved-gate refetches the first real view anyway = paint-then-refine, never
   paint-and-trust). Device-measured on the 4a: cold-launch home-area dots at ~3.0 s
   (bounded by app+map startup, proven the disk path - no network paint can land by then)
@@ -1920,10 +1924,12 @@ Defaults that make the safe path the easy one:
   the warning). NB on a device with NO TTS voice the later "no voice engine" hint overwrites the
   flash (single status slot) - with any voice installed the warning shows and is spoken.
   **Stops are checked too (issue #606, 2026-09-25, now in `NavController`):** every stop still
-  ahead is tested first against its arrival (the route's `legs` summed up to it), then the
-  destination; the first problem is the one warning. A stop added DURING the drive
-  (`addStopDuringNav` -> `warnClosingForAddedStop`) waits up to 20 s for the replanned route and
-  checks its first leg, which is the way to that stop.
+  ahead is tested first against its arrival, then the destination; the first problem is the one
+  warning. Every router returns a trip with stops as ONE leg, so a stop's arrival is the trip time
+  scaled by its along-route fraction (`NavController.stopArrivals`, `NavEngine.stopMarks`); the
+  first cut summed `route.legs` and never reached a stop (caught by the 2026-09-25 doc audit). A stop
+  added DURING the drive (`addStopDuringNav` -> `warnClosingForAddedStop`) waits up to 20 s for the
+  replanned route and is checked the same way on it.
 - **Location-permission UX gates (2026-07-10).** Turn-by-turn REQUIRES precise location (coarse
   fixes are ~2 km; the nav fix discipline correctly refuses non-GPS and >50 m fixes, so nav on
   coarse sat at "Searching for GPS" forever with no explanation). `onStartNav` in MapScreen now
@@ -2282,7 +2288,7 @@ NOT live in the repo - re-upload it if the mark changes.
 
 The README stays SHORT: pitch, **"What reaches Google, by default"**, screenshots, install,
 what-you-get, the full **privacy comparison matrix** (kept IN the README - user 2026-07-11, it's
-the sharpest one-glance pitch), build. The at-a-glance table sits ABOVE the screenshots on purpose
+the sharpest one-glance pitch), and a pointer to docs/BUILDING.md. The at-a-glance table sits ABOVE the screenshots on purpose
 (user 2026-09-19): people were reading the app as a Google Maps WebView, which the screenshots
 encourage, and the full matrix was 200 lines down where a visitor never reached it. Its first line
 answers the wrapper question directly and every row has to stay literally true - the routing row
@@ -2317,7 +2323,8 @@ architecture note.
   `MapViewModel.rankBias(near)` passes the user's location when it is within ~50 km of the
   viewport, so a local search sorts and labels distances from YOU instead of reshuffling
   around wherever the screen is centered; browsing a far city keeps viewport-center ranking.
-  Wired at runSearch + the suggest fetch; searchAlongRoute keeps its route-midpoint bias.
+  Wired at runSearch, More results, A-to-B and the typing FALLBACK search (the autocomplete
+  request itself takes only the bias point); searchAlongRoute keeps its route-midpoint bias.
 - **Release cadence (user 2026-09-13): merges go to `canary` (push main to the canary branch); nightlies
   are the daily cron's job. Do not dispatch CI after every merge.**
 - **EVERY STABLE'S NOTES LEAD WITH A SHORT "WHAT'S NEW" LIST (user 2026-09-13).** The in-app
@@ -2546,7 +2553,7 @@ architecture note.
 - **ROUTE BAR + CROSS LABELS (2026-09-17):** `RouteBarStrip` lays badges in their OWN lane right of
   the track (`TRACK_COL` / `badgeCx`), so a 26 dp badge no longer covers the congestion band under
   it, and the remaining-distance label is gone (the bottom bar has it; "768.8 mi" overflowed the
-  strip). `NavController.refreshRouteBar` adds `speedCameras` as CAMERA marks (flock marks already
+  strip). `NavController.updateRouteBar` adds `speedCameras` as CAMERA marks (flock marks already
   pass `CameraFacing.onRoute`; fixed speed cams carry no direction, so distance only).
   `crossLabelPoint` now tries `NAV_XLABEL_OFFSETS` on BOTH sides and keeps the
   first with `NAV_XLABEL_CLEAR_M` clearance, and the label pass only marks its quantum done once it
@@ -2613,7 +2620,7 @@ architecture note.
   a comment tail; rows carry their content at column 22 (searched, not assumed; only the FIRST object is read, the app gets a second `{"c":0,"d":"","e":token}` after the tail): primary,
   secondary, `[_,_,lat,lng]` at 11, `[[featureId, title, _, [_,_,lat,lng], ..]]` at 13. Rows
   without a location are bare queries ("Starbucks" + "See locations") -> `querySuggestions`
-  (state) -> a plain search row. When suggest answers, the local pack's exact hits still lead
+  (state) -> a plain search row. When suggest answers, the on-device geocoder's hits (any of its four layers) still lead
   (deduped by house number) and the Photon + search-endpoint race is skipped; when it throws or
   is off (offline, NoGoogle) the old pipeline runs unchanged. `runSearch` uses it as a GEOCODER
   too: a typed house address whose search results carry no such house number asks suggest and
@@ -2650,10 +2657,10 @@ architecture note.
   leaves the phone; PRIVACY.md has the user-facing wording. Local rows are instant and the only
   thing that shows offline. `LocalSuggestion` (kind RECENT_QUERY / RECENT_PLACE / SAVED_PLACE) renders above
   the network rows in `SearchEntryContent`. Dedup of network vs local is by `nameLocKey` (name +
-  coarse location), NOT feature id - SavedPlace-backed locals carry no id, so an id-only compare
-  double-shows them. Clear `localSuggestions` everywhere `suggestions` clears. **Press-hold / ⋮
+  coarse location) AND by feature id where both have one - SavedPlace-backed locals carry no id, so
+  an id-only compare double-shows them. Clear `localSuggestions` everywhere `suggestions` clears. **Press-hold / ⋮
   menu on a suggestion (issue #180, 2026-07-19):** every suggestion row (local AND network) now
-  has a trailing ⋮ overflow plus a long-press (`SuggestionRow` gained `onLongClick` + a `trailing`
+  (every place-backed row; bare query rows have none) has a trailing ⋮ overflow plus a long-press (`SuggestionRow` gained `onLongClick` + a `trailing`
   slot; the row uses `combinedClickable`), both opening a `VelaMenu` via `SuggestionOverflow` -
   "Save to list" for any place-backed row (reuses PlaceSheet's `SaveToListSheet`, made `internal`)
   and "Remove from history" for removable rows. The ⋮ is the D-pad key path for the long-press
@@ -2797,7 +2804,7 @@ architecture note.
   Google's pin is drawn instead. Two reasons
   Google's copy is better wherever it exists: its coordinate is the storefront, where Overture
   stacks a building's tenants on ONE parcel point and the bake spreads the stack onto an invented
-  8-20 m ring; and its ranking comes from review counts rather than a category prior. The open
+  10-20 m ring; and its ranking comes from review counts rather than a category prior. The open
   layer then holds exactly what Google did not return, which is the point of Both. Offline nothing
   is hidden (no ambient places to match against). The same pass purges closures: Google's nearby
   answer keeps its permanently closed places in `ambientClosed` (never painted), and an open icon
@@ -2903,7 +2910,7 @@ architecture note.
   after the shop inside it, and Google's listing under the operator's name, plus a pizza place
   sharing the station's name. So `PlaceNames.sameBusiness` takes the icon groups (an OVERLAP across
   two known, different kinds is refused; EXACT/VARIANT still cross kinds), `sameFuelLot` calls two
-  fuel kinds within 45 m one station, both twin passes and the tap pool use them, and the bake keys
+  fuel kinds within 30 m one station, both twin passes and the tap pool use them, and the bake keys
   fuel rows by house number too. The Both-mode twin pass reads the ambient feature's `icon`
   (`vela-poi-<group>`) and `hn`, and the open feature's `group` and `addr`. The lot rule is 30 m
   and two different known house numbers refuse it (two stations facing each other across a road).
@@ -3071,9 +3078,9 @@ architecture note.
   `MapViewModel.scheduleAutoRegionPatches`: a minute after start, at most once per 20 h, every
   installed places/basemap archive and place pack with a patch FROM its installed rev takes it,
   never a full download; Update's full download is `download(replace = true)` over the installed
-  copy instead of delete-then-download. OFF **is the default until somebody has watched a
-  patch download and apply on a device** - a feature that rewrites an installed archive does not get
-  to default itself on - then WIFI / MOBILE, metered judged by
+  copy instead of delete-then-download. WIFI **is the default since 2026-09-25** (it was OFF
+  until a patch had been watched downloading and applying on a device, which happened 2026-09-19;
+  an explicit "Never" is kept) - then MOBILE, metered judged by
   `isActiveNetworkMetered` so a metered Wi-Fi counts), Settings > Offline maps; a FULL re-download is
   never automatic on any setting. Every attempt is logged (`diag.record("delta")` + logcat
   `VelaDelta`) with the bytes and the reason for a fallback, because the failure worth seeing is a
@@ -3956,7 +3963,7 @@ Gotchas:
   of retrying, AND `OSRM_SUPPORTS_EXCLUDE=false` keeps the param OFF entirely - sending it
   400'd the whole request and lost the clean named-turn route while a chip was on, a worse
   route than just not honoring avoid online; flip the const on a self-hosted OSRM), so the AUTHORITATIVE avoid router
-  offline is the on-device obf engine: dynamic routing.xml params (`avoid_toll` / `avoid_highway`), no
+  offline is the on-device obf engine: dynamic routing.xml params (`avoid_toll` / `avoid_motorway`), no
   baked profiles. directions() tries the on-device avoid route FIRST when a toggle is on; an engine that
   cannot honor it returns EMPTY (never silently routes through a toll) and the online chain falls back to a
   NORMAL route. (The GraphHopper CH avoid profiles and the v2 graph generation that did this from
@@ -4059,7 +4066,7 @@ Gotchas:
   constraint. Null heading (stationary, or a fix without one) also sends nothing - a stale heading
   is worse than none. Unit-tested on the STRING (`DepartBearingTest`) because a malformed parameter
   is not an error: OSRM ignores it and routes as before, so the fix would silently do nothing.
-  Note the related gate this does NOT change: off-route detection needs `movingFloorMps` = 2.0, so
+  Note the related gate this does NOT change: off-route detection needs `movingFloorMps` (2.0 driving, 1.0 cycling, 0.6 walking), so
   inching away from a junction is not counted as deviating until the 90 m far-off rule fires.
   **An urgent fetch waits at most `URGENT_GOOGLE_GRACE_MS` (2.5 s) for Google once OSRM has answered
   (issue #397, 2026-09-15):** a diagnostics export showed reroutes taking 18 to 40 s during a
@@ -4196,8 +4203,10 @@ Gotchas:
   **Via-route spur guard, the SHAPE test (2026-09-06, same day, after the reporter said the appendix
   hung off a motorway with no turn for miles):** a via that lands on an OFF-RAMP snaps a few meters
   and adds only a ramp pair, so the snap-distance and length guards below miss it. `hasSpur(route,
-  course)` projects the via route onto Google's line (windowed) and flags any >=250 m stretch that
-  advances <35% of the distance traveled; the first/last 300 m are exempt. Applied to every via
+  course)` projects the via route onto Google's line (windowed) and flags a >=80 m stretch
+  (`SPUR_MIN_M`) that advances <45% of the distance traveled, resetting on >=80% progress; the
+  first/last 300 m are exempt, and the data source refuses only when a turn sits within 150 m of
+  the spur (`spurWithTurn`, the loop-ramp exception). Applied to every via
   route in `directions()`; unit-tested with an out-and-back appendix and a ramp-shaped loop.
   **Via-route spur guard (2026-09-06):** `routeOsrm` refuses a via route when any interior via snapped
   >40 m (`VIA_SNAP_MAX_M`, from OSRM's `waypoints[].distance`) and `snapReaches` also requires the via
@@ -4232,8 +4241,8 @@ Gotchas:
   third chip in both choosers), and offline the obf car profile takes `avoid_ferries` (the id in the
   vendored `net/osmand/router/routing.xml`, DRIVE only). FOSSGIS OSRM cannot exclude ferries, so
   as with tolls the Google route leads and the plain OSRM routes are not offered while it is on.
-  NB the obf highway param Vela sends is `avoid_highway`, but that routing.xml declares only
-  `avoid_motorway`; offline avoid-highways looks like a no-op until that is checked on a device.
+  (The obf engine sends `avoid_motorway`, the id that routing.xml declares for the car profile;
+  an earlier note here said `avoid_highway`, which was wrong.)
   Device-checked on a downtown-to-suburb drive: the interstate route gave way to a state-highway
   one, ~14 min longer, with a live-traffic ETA on both.
   **THE CATALOG COVERS EVERY GEOFABRIK COUNTRY (2026-09-12, 425 rows):** 131 rows added in one
@@ -4999,8 +5008,8 @@ Gotchas:
   Brazil/India/Japan/Indonesia zones, countries) plus davis: finer pieces than the live routing catalog's
   whole countries, so `downloadPlacesForRegion` pulls EVERY archive whose box center falls inside the
   downloaded region (a whole-country download today gets all its pieces, a Land download later gets one),
-  and `sourcesFor` streams the smallest covering piece. The full bake is two manual `places-overlays.yml`
-  dispatches, `shard=a` and `shard=b` (the matrix caps at 256 jobs), max-parallel 4, hours each; `MapPoiPrefs.placesSource` (Settings > Data & privacy since
+  and `sourcesFor` streams the smallest covering piece. The full bake is `places-overlays.yml` on its monthly crons (6th shard a, 7th shard b; the
+  matrix caps at 256 jobs) plus the nightly seventh at 04:40, max-parallel 8; `MapPoiPrefs.placesSource` (Settings > Data & privacy since
   2026-09-16, was Map; "Places come from": `open` ("Vela data", compiled default) / `google` / `both`; the FLEET DEFAULT
   is remote since 2026-09-16 (`calibration.json` `defaultPlacesSource`, v20 -> `Calibration.defaultPlacesSource`
   -> the VM pushes it into `MapPoiPrefs.setRemoteDefault` at init + after refresh, same channel as
@@ -5036,8 +5045,8 @@ Gotchas:
   business POIs (`poi_r1/r7/r20`) under an open places source (2026-09-16, final shape): OSM
   BUSINESS classes (`OSM_BUSINESS_CLASSES`: the style's food/shop/lodging/fuel groups plus the
   commercial health and money classes) are hidden outright by a static term in
-  `applyPoiTierFilters` (`osmHideBusiness`, false when `MapPoiPrefs.osmBusinesses` "OpenStreetMap
-  shops too" is on (2026-09-17, ON by default); then `osmFillIn` queries EVERY open icon group, not
+  `applyPoiTierFilters` (`osmHideBusiness`, false when `MapPoiPrefs.osmBusinesses` is on (2026-09-17;
+  no longer a setting since 2026-09-23, always on for older archives); then `osmFillIn` queries EVERY open icon group, not
   just the non-business ones, so OSM businesses twinning an open place drop by name; set by the overlay effect, and also while
   `placesPending` says the first places lookup has not answered, so a cold start does not flash
   OSM's shops and then drop them), because Overture,
@@ -5085,7 +5094,7 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   it draws), **three bake rules + one layer rule from the strip-mall look (2026-09-15 evening):**
   (1) STACKED POINTS: Overture puts a building's tenants on one parcel point (17% of Davis rows
   shared their point: medical suites, strip-mall tenants) and coincident icons collide at EVERY
-  zoom, so the shop under a stack never drew; the bake spreads a stack on a small ring (8 to 20 m,
+  zoom, so the shop under a stack never drew; the bake spreads a stack on a small ring (10 to 20 m,
   golden-angle steps, best row stays put) and the layer allows icon overlap from z18 (a step
   expression) for archives baked before that. (2) TENANTS: a row at an anchor category's address
   (supermarket, department store, mall, hospital, university, big-box) within ~200 m and not an
@@ -5138,7 +5147,8 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   On a cold start (a `geo:...?q=` deep link into a fresh process) that held the search at 13 s
   against 4 s warm and left the map blank throughout; measured on the 4a, results now land 10 s
   after process launch instead of 18.5 s. `warmPlaceWebViews()` runs from the results publish.
-- **Photos use a hidden WebView** (`app/web/WebPhotoFetcher`). The full gallery RPC
+- **Photos use a hidden WebView** (SUPERSEDED 2026-09-23 for first photos: one `hspqX` request with
+  the `rpcContext` header answers keyless; the walk below is the fallback and "More photos"). (`app/web/WebPhotoFetcher`). The full gallery RPC
   (`hspqX`) serves real photos only to a real browser engine - OkHttp gets a
   bot-degraded Street-View-only reply (TLS-fingerprint detection, not headers).
   The WebView loads `maps.google.com` **anonymously (no login)** and same-origin-
@@ -5307,7 +5317,7 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   calibration, the plain OSRM route kept its free-flow fiction and sorted as "Fastest" ahead of
   Google's honest alternates; and the snap's ETA-margin gate compared Google's live ETA against
   the RAW free-flow, so a jam-avoiding snap lost to the fiction every time. The gate now uses the
-  calibrated free-flow, and the `directions` diag logs `cal=`. **Multi-stop trips are calibrated too (same review):** Google's keyless answer USED TO BE the DIRECT trip, so `speedCal` compared average SPEEDS (the distance difference cancels) and the via route went through `applyTraffic` with `withSpans = false`; `applyTrafficRatio` is gone, and the recheck's `etaScale` no longer jumps when the last stop is passed. **SINCE 2026-09-21 GOOGLE IS ASKED FOR THE TRIP THROUGH THE STOPS (issue #600 made the gap visible: "why are we hitting open source routers when google supports stops").** `DirectionsPb.withWaypoints` adds one top-level `!1m4!3m2!3d<lat>!4d<lng>!6e2` group per stop between the origin and destination groups (a repeated field; no enclosing count moves; verified live from a plain client on the Davis fixture: direct 15.3 mi / 21 min with three alternates, through Woodland ONE route at 45 min with per-leg distances). The multi-stop branch then mirrors the single-destination one: same course = the open via route with Google's real through-the-stops time and spans (`freeFlowCal` from durations, like a single trip); Google left the course = the open router is snapped along Google's line LEG BY LEG (`RouteGeometry.sampleViasThrough`: the samples of each leg with the real stop between them), kept on the same reach / length / spur / ETA-margin rules, with the stops passed as `routeVia(looseVias=)` so a stop set back in a lot does not trip the strict via-snap refusal that exists for sampled points; avoid on and the snap failed = Google's own abbreviated route through the stops (it honors the avoid) rather than a plain route that ignores it. **THE GUARD:** `RouteGeometry.stopsOnLine` (250 m to the nearest vertex of Google's line, in trip order) decides whether Google actually called at the stops; a template drift that dropped the waypoint groups would otherwise hand back the direct trip and read as a valid route, so a reply that misses a stop takes the OLD direct-trip handling (`speedCal`, spans off) and the diag line says `googleStops=IGNORED`. The `directions` multi-stop line is mirrored to logcat as `VelaDirections` (no coordinates). `speedCal` stays for exactly that fallback. NB `DirectionsParser`'s `start`/`end` paths (`[7][3][2]`, `[7][3][3]`) are the route's BOUNDING-BOX corners, not its endpoints; they only coincide on a southwest-to-northeast trip like Davis to Sacramento (found reading the via reply, where the "start" mixed Davis's latitude with Woodland's longitude). They feed only the no-geometry fallback line, so nothing shipped wrong, but do not build on them. A same-course primary also carries Google's `typicalLow/High` range (distance-scaled), so the depart-time chooser shows "usually X-Y" for it, not only for provisional alternates. **Per-alternate re-rank (2026-07-01):** each Google route in `root[0][1]` carries its
+  calibrated free-flow, and the `directions` diag logs `cal=`. **Multi-stop trips are calibrated too (same review):** Google's keyless answer USED TO BE the DIRECT trip, so `speedCal` compared average SPEEDS (the distance difference cancels) and the via route went through `applyTraffic` with `withSpans = false`; `applyTrafficRatio` is gone, and the recheck's `etaScale` no longer jumps when the last stop is passed. **SINCE 2026-09-21 GOOGLE IS ASKED FOR THE TRIP THROUGH THE STOPS (issue #600 made the gap visible: "why are we hitting open source routers when google supports stops").** `DirectionsPb.withWaypoints` adds one top-level `!1m4!3m2!3d<lat>!4d<lng>!6e2` group per stop between the origin and destination groups (a repeated field; no enclosing count moves; verified live from a plain client on the Davis fixture: direct 15.3 mi / 21 min with three alternates, through Woodland ONE route at 45 min with per-leg distances). The multi-stop branch then mirrors the single-destination one: same course = the open via route with Google's real through-the-stops time and spans (`freeFlowCal` from durations, like a single trip); Google left the course = the open router is snapped along Google's line LEG BY LEG (`RouteGeometry.sampleViasThrough`: the samples of each leg with the real stop between them), kept on the same reach / length / spur / ETA-margin rules, with the stops passed as `routeVia(looseVias=)` so a stop set back in a lot does not trip the strict via-snap refusal that exists for sampled points; avoid on and the snap failed = Google's own abbreviated route through the stops (it honors the avoid) rather than a plain route that ignores it. **THE GUARD:** `RouteGeometry.stopsOnLine` (250 m to the nearest vertex of Google's line, in trip order) decides whether Google actually called at the stops; a template drift that dropped the waypoint groups would otherwise hand back the direct trip and read as a valid route, so a reply that misses a stop takes the OLD direct-trip handling (`speedCal`; spans still carried over geometrically, there is no spans-off call any more) and the diag line says `googleStops=IGNORED`. The `directions` multi-stop line is mirrored to logcat as `VelaDirections` (no coordinates). `speedCal` stays for exactly that fallback. NB `DirectionsParser`'s `start`/`end` paths (`[7][3][2]`, `[7][3][3]`) are the route's BOUNDING-BOX corners, not its endpoints; they only coincide on a southwest-to-northeast trip like Davis to Sacramento (found reading the via reply, where the "start" mixed Davis's latitude with Woodland's longitude). They feed only the no-geometry fallback line, so nothing shipped wrong, but do not build on them. A same-course primary also carries Google's `typicalLow/High` range (distance-scaled), so the depart-time chooser shows "usually X-Y" for it, not only for provisional alternates. **Per-alternate re-rank (2026-07-01):** each Google route in `root[0][1]` carries its
   OWN `duration_in_traffic` (`parseRoute` reads `summary[10][0][0]` per route), so the returned list is now
   **sorted by live in-traffic ETA - fastest leads, Google-style.** (Earlier note that this was "impossible"
   was wrong: it's only true for the OSRM-only alts, which share `gTop`'s ratio; Google's alts carry real
@@ -5352,7 +5362,7 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   NO map/transport - `scripts/VelaObfShim.java` sets the IndexCreatorSettings booleans the CLI
   lacks) makes Germany ~2 GB where graph+pack was ~8. CoreModule binds `ObfRouteEngine`
   directly since 2026-09-15 (GraphHopper retired); avoids (toll/motorway/ferry) are DYNAMIC
-  routing.xml params (`avoid_toll`/`avoid_highway`/`avoid_ferries`) so they work offline with no baked profiles,
+  routing.xml params (`avoid_toll`/`avoid_motorway`/`avoid_ferries`) so they work offline with no baked profiles,
   and bicycle/pedestrian profiles come free. Turn mapping pinned by ObfRouteEngineTest (CONTINUE
   is voice-silent - a mis-mapped u-turn gets swallowed; instruction text reuses ghPhrase so all
   languages come along). Bake: `scripts/build-obf-region.sh` + `merge-obf-manifest.sh` +
@@ -5549,9 +5559,8 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   and answers the viewport box, the nav corridor, the camera corridor and the pass-the-light
   enrichment from memory. `MapViewModel.roadFeaturesCover*` returns LOADED / NONE / FAILED: NONE
   (no region in the manifest) is the only case that still reaches Overpass; FAILED shows nothing
-  and retries next viewport (a failure is never cached). **Nothing is baked until the workflow is
-  dispatched** (`gh workflow run road-features.yml -f group=us` etc.; all 425 catalog rows fit in
-  two dispatches); until then the manifest is empty and every phone keeps the Overpass path. Local
+  and retries next viewport (a failure is never cached). The world is baked (the `road-features` release carries a file per catalog region, refreshed by
+  the 4th/6th monthly crons); Overpass remains only where no region covers the point. Local
   test: bake one region with the osmium + `scripts/road_features_tsv.py` steps, serve it with a
   manifest on :8099, `adb reverse`, build with `-ProadFeaturesManifestUrl=`.
   **THE CORRIDOR QUERY ANR'D THE APP ON A LONG ROUTE (2026-09-13, three ANR traces from a
