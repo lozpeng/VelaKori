@@ -116,13 +116,13 @@ Chrome UA with that cluster missing is a sharper inconsistency than an old versi
 | --- | --- | --- |
 | `User-Agent` | calibrated UA | calibrated UA |
 | `Accept` | `text/html,...` | `*/*` |
-| `Accept-Language` | `en-US,en;q=0.9` | `en-US,en;q=0.9` |
+| `Accept-Language` | the app's language list, Chrome's form (`en-US,en;q=0.9` on an American phone) | same |
 | `Sec-CH-UA` | calibrated brand list | calibrated brand list |
 | `Sec-CH-UA-Mobile` | `?0` | `?0` |
 | `Sec-CH-UA-Platform` | `"Windows"` | `"Windows"` |
 | `Sec-Fetch-Dest` / `-Mode` / `-Site` | `document` / `navigate` / `none` | `empty` / `cors` / `same-origin` |
 | `Referer` | none, as on a real first visit | `https://www.google.com/maps/` |
-| `Downlink` / `RTT` | not sent | `10` / `50` |
+| `Downlink` / `RTT` | not sent | Cronet's own estimate, rounded like Chrome's (`10` / `50` until it has one) |
 
 The last row exists because google.com's `Accept-CH` asks for exactly those two network hints
 (checked 2026-09-22), and Chrome sends them, rounded, on every request after the first
@@ -391,10 +391,24 @@ exactly as before.
   script (`WebProxy.SHIM`, dial `webProxyPosts`, default 1 when the proxy is on) wraps XHR, `fetch`
   and `sendBeacon` on google.com pages. A POST to a Google host gets a one-time id appended to its
   URL and its body handed to the bridge first; when the tagged request reaches the interceptor, the
-  body is waiting for it, the tag is stripped and the app sends it. Only plain-text bodies (a
-  string or URL parameters) are carried; FormData, a Blob or a Request object goes out from the
-  WebView as before. Measured on a Pixel 9 before the shim, the POSTs left were the review page's
-  `batchexecute`, `play.google.com/log` and the account bar's `ogads-pa` calls.
+  body is waiting for it, the tag is stripped and the app sends it. A string or URL parameters go
+  over as text; a Blob, ArrayBuffer, typed array or a `Request` object goes over as base64
+  (`putB64`), read asynchronously where the type needs it. Only FormData is left, and a Google POST
+  the shim cannot read logs `untagged POST body: <type>`. Measured on a Pixel 9 before the shim, the
+  POSTs left were the review page's `batchexecute`, `play.google.com/log` and the account bar's
+  `ogads-pa` calls; with the text-only shim, one binary `play.google.com/log` POST and the two
+  preflights were left (2026-09-25); with binary bodies and preflights carried, a place tap sends
+  nothing from the WebView itself.
+- **Missing headers are filled in.** The WebView hands `shouldInterceptRequest` only some of its
+  headers; captured on 2026-09-25, proxied tiles, icons, scripts and log calls went out with no
+  `Sec-Fetch-*` at all and many without `Sec-CH-UA`. The proxy now adds what is missing the way
+  Chrome derives it (`BrowserHeaders.fetchMetadata`): the main frame is a navigation, an `image/`
+  or `text/css` Accept is an image or a stylesheet, a `.js` or `/js/` path is a script, a POST or
+  anything else is a fetch; the site is judged against the page's host. Stylesheets go at the
+  highest priority and images at the lowest, as Chrome loads them.
+- **CORS preflights** (`OPTIONS`) to a Google host go out over Cronet like the GETs, so the WebView
+  never asks Google anything itself. A 204 answer is handed to the page as a 200, the same 4a
+  finding as the telemetry answer below.
 - **Telemetry can be answered locally**, and since 2026-09-25 that is the user's choice: Settings >
   Privacy "Block Google's page telemetry" (`web/GoogleTelemetry`, default OFF; the dial
   `webProxyBlockLogs` still overrides when set). Blocked, `play.google.com/log`, any `gen_204` ping
@@ -618,8 +632,8 @@ without a release. This table is the record to revert from.
 | First photos | `hspqX` RPC, one request asking for 50 (`placePhotoPage`, `PHOTO_COUNT`), dated; a full session answers 50, a limited one 10 | two more tries; then the sheet keeps the search's hero photo and "More photos" walks the page | `nativePlacePhotos` 0 | the full page walk (every gallery tab) on every tap |
 | More photos | the next `hspqX` page, one request per page (cursor at `[4][2][2]` of the request, payload[5] of the reply; payload[1] is not the photo total and is not read) | one retry, then the full page walk | `nativePlacePhotos` 0 | the same walk |
 | Menu tab | only from the page walk: "Load all photos and reviews" on, or "More photos" after native paging fails. The RPC carries no category per photo | none | none | the walk on every tap |
-| First reviews | the page scrape, stopped at `FIRST_REVIEWS = 10` (the default). The one-request `qv9Egd` feed (`reviewFeed`) is built but off: on the app's own session, new every launch, it got the limited 5 reviews, and on the WebView's aged session (where it is sent now, with the other per-place requests) it got 0 on a Pixel 9. It stays off until a reply from a healthy session has been captured | the page scrape | `nativeReviewFeed` 1 turns the feed on (compiled default 0) | the page scrape to 50 on every tap |
-| More reviews (inline) | the feed's next page, when a reply carries a token (UNVERIFIED: no captured reply has one yet) | the All reviews page | follows `nativeReviewFeed` | the scrape already held up to 50 |
+| First reviews | the page scrape, stopped at `FIRST_REVIEWS = 10` (the default), and only once the Reviews tab is scrolled into view (2026-09-25; the page is about 137 Google requests and most taps never reach the reviews). The one-request `qv9Egd` feed (`reviewFeed`) is built but off: on the app's own session, new every launch, it got the limited 5 reviews, and on the WebView's aged session (where it is sent now, with the other per-place requests) Google answers an empty list flagged `[true]`, because a full session requires the `X-maps-bgkey` BotGuard token Google's own page mints for each request (captured 2026-09-25 on a Pixel 9; a clean GitHub machine got the five a new session gets). So a native feed can only ever be the limited one, and the page scrape stays the path | the page scrape | `nativeReviewFeed` 1 turns the feed on (compiled default 0) | the page scrape to 50 on every tap |
+| More reviews (inline) | the feed's next page, when a reply carries a token (payload[1], confirmed in a full-session reply on 2026-09-25) | the All reviews page | follows `nativeReviewFeed` | the scrape already held up to 50 |
 | All reviews | Google's own page, full screen, on tap | none | none | the same |
 | Details (popular times, blurb, count, hours) | the search reply when it has them; else ONE plain request of the details page's own search (`placeDetails`, same parser), up to three tries while popular times are missing | the details page, only when every try came back stripped | `nativeDetails` 0 | the details page on nearly every tap |
 | Page warm-ups after a search | none | none | none | google.com + Maps loaded in two hidden views per search |
@@ -689,9 +703,9 @@ several hundred, and it streams while the walk made you wait for everything.
 ## Limits
 
 - **The handshake is Chrome's only while Cronet carries the request.** The Cronet build is
-  Chromium 143 and offers three fewer signature algorithms than current Chrome, so its `ja4`
-  differs until the build catches up (SPEC 3.6). The APK ships Cronet's native library for ARM
-  only, so on an x86 emulator or Chromebook, and after any Cronet failure, Google requests go
+  Chromium's own prebuilt Release build of the Chrome for Android stable Vela claims (155 since
+  2026-09-25, pinned in `gradle.properties`, SPEC 3.6); it was Maven's 143 before, three signature
+  algorithms short of current Chrome. The APK ships Cronet's native library for ARM only, so on an x86 emulator or Chromebook, and after any Cronet failure, Google requests go
   over OkHttp, whose handshake says OkHttp. A TLS stack of Vela's own would need native
   dependencies and permanent maintenance and would break reproducible F-Droid builds, so there
   is none.

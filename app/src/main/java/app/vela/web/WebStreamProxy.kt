@@ -45,13 +45,15 @@ class WebStreamProxy(private val engine: CronetEngine, private val cookies: okht
         }
     }
 
-    /** A GET as the WebView asked for it, or a POST whose [postBody] the page shim handed over (the
-     *  WebView never passes a POST body to shouldInterceptRequest), sent to [target]. */
+    /** A GET as the WebView asked for it, a POST whose [postBody] the page shim handed over (the
+     *  WebView never passes a POST body to shouldInterceptRequest), or a CORS preflight ([method]
+     *  OPTIONS), sent to [target]. */
     fun fetch(
         req: WebResourceRequest,
         target: String = req.url.toString(),
         postBody: ByteArray? = null,
         postType: String? = null,
+        method: String? = null,
     ): WebResourceResponse? {
         val url = target
         val headersReady = CountDownLatch(1)
@@ -69,9 +71,32 @@ class WebStreamProxy(private val engine: CronetEngine, private val cookies: okht
             override fun onFailed(r: UrlRequest, i: UrlResponseInfo?, e: CronetException) { body.failed = true; body.q.put(ByteArray(0)); headersReady.countDown() }
             override fun onCanceled(r: UrlRequest, i: UrlResponseInfo?) { body.q.put(ByteArray(0)); headersReady.countDown() }
         }
-        val b = engine.newUrlRequestBuilder(url, cb, executor).setHttpMethod(if (postBody != null) "POST" else "GET")
+        val b = engine.newUrlRequestBuilder(url, cb, executor).setHttpMethod(method ?: if (postBody != null) "POST" else "GET")
         req.requestHeaders.forEach { (k, v) ->
             if (!k.equals("X-Requested-With", true) && !(postBody != null && k.equals("Content-Type", true))) b.addHeader(k, v)
+        }
+        if (req.requestHeaders.keys.none { it.equals("Accept-Language", true) }) {
+            b.addHeader("Accept-Language", app.vela.core.data.google.BrowserHeaders.acceptLanguage)
+        }
+        val accept = req.requestHeaders.entries.firstOrNull { it.key.equals("Accept", true) }?.value.orEmpty()
+        app.vela.net.CronetHolder.shape(b, mainFrame = req.isForMainFrame)
+        // What the WebView did not hand over, filled in the way Chrome would have sent it.
+        val have = req.requestHeaders.keys.map { it.lowercase() }.toSet()
+        if ("sec-fetch-site" !in have) {
+            val referer = req.requestHeaders.entries.firstOrNull { it.key.equals("Referer", true) }?.value
+            app.vela.core.data.google.BrowserHeaders.fetchMetadata(url, referer, accept, req.isForMainFrame, if (postBody != null) "POST" else (method ?: "GET"))
+                .forEach { (k, v) -> if (k.lowercase() !in have) b.addHeader(k, v) }
+        }
+        if ("sec-ch-ua" !in have) {
+            val cal = app.vela.core.config.CalibrationStore.latest
+            b.addHeader("Sec-CH-UA", cal.secChUa)
+            b.addHeader("Sec-CH-UA-Mobile", "?0")
+            b.addHeader("Sec-CH-UA-Platform", "\"Windows\"")
+        }
+        // Chrome loads stylesheets first and images last (u=0 / u=3 in its Priority header).
+        if (!req.isForMainFrame) when {
+            accept.startsWith("text/css") -> b.setPriority(org.chromium.net.UrlRequest.Builder.REQUEST_PRIORITY_HIGHEST)
+            accept.startsWith("image/") -> b.setPriority(org.chromium.net.UrlRequest.Builder.REQUEST_PRIORITY_LOWEST)
         }
         if (postBody != null) {
             b.addHeader("Content-Type", postType ?: "application/x-www-form-urlencoded;charset=UTF-8")

@@ -2,8 +2,20 @@
 
 ## What you see
 
-Settings > Offline maps has two ways in. **Download the area you're viewing** saves the screen
-you are looking at, and quietly pulls the whole region around it too. **Entire states &
+Settings > Offline maps has two ways in. **Download an area** is Google's picker (issue #609,
+2026-09-25): it drops you on the map with a frame over it (`MapUiState.areaPicking`, the insets
+`MapViewModel.AREA_FRAME_*`, shared by the overlay and the bounds math), and panning and pinching
+choose what the frame covers, from a neighborhood to half a state. Whatever the framing zoom, the
+area is saved at full street detail: every zoom from two above the framing one down to the vector
+tiles' last (14). The card under the frame prices it live: tiles counted per zoom, times the
+region's own density where Vela has its map archive (the archive's size over its box's tiles; the
+Woodland to Dixon frame, mostly farmland, estimated 5 MB and measured 5.9 MB from 509 sampled
+tiles at about 12 KB), else `AREA_TILE_KB` (110 KB). Over `AREA_MAX_TILES` (60,000, about half of a
+large US state) it says to zoom in or take the whole region. The region around the frame (routing,
+place pack, places file, the region's map and building outlines) only comes whole and is a
+checkbox on the same card. Before 2026-09-25 the button lived in Settings, saved whatever the map
+last showed at only a few zoom levels around the current one (so a zoomed-out view was saved with no
+street detail) and pulled the whole region silently. **Entire states &
 countries** is the catalog: one tap on a state, a province or a country downloads everything
 Vela needs to work there with no signal. One card on the map follows the whole download piece by
 piece, and one message at the end says whether the region is ready or only partly there.
@@ -280,6 +292,11 @@ direction and by connection:
   roads reach the center, the ring or any corner (`keepMounted`). Before this rule, panning from
   Pennsylvania across the New York line with only Pennsylvania installed blanked the whole screen,
   the Pennsylvania half included, for twelve seconds (issue #552).
+  The same loose rule picks an archive to mount in the first place: offline, any installed
+  archive whose roads reach the view beats the world floor. Until 2026-09-26 a fresh offline mount
+  still had to pass the online test, so a screen with one corner over a lake mounted the world
+  floor instead and never recovered (reproduced on a lakeshore downtown with the whole state
+  installed: places on an empty map; after the fix, the state's streets).
 - Either way, swaps are at least `BASEMAP_SWAP_COOLDOWN_MS = 2_000` apart, and a newer camera idle
   cancels a pending one.
 - Where nothing installed holds the map, the world floor draws: coastlines, water, borders and

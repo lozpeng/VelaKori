@@ -142,7 +142,17 @@ push whose diff or commit messages contain a term from a private list kept OUTSI
 `~/.vela-location-terms` (override with `VELA_LOCATION_TERMS`). The list is never committed, never
 pasted into an issue, and never read back into a commit message; the check reports that a term
 matched, never which one. CI's Location guard is the same test with the `LOCATION_TERMS` secret,
-one push too late.
+one push too late. Both skip the same files, the region catalogs (`tools/*regions*.json`),
+`region_polys.json`, `docs/stats/` and `*.pmtiles`, which name every state and country on
+purpose; the two exclusion lists must stay in step. **The private list must carry the maintainer's
+own state and city, not only street-level terms** (2026-09-26: the state was missing, a comment
+naming it went out on canary, and canary had to be rewritten). After editing the file, sync the
+secret: `gh secret set LOCATION_TERMS < ~/.vela-location-terms`.
+
+**Operational footprint is location data too.** Workflow dispatch inputs, run names, bake order,
+test regions, device-test areas and release notes are public. Never single out the maintainer's
+region or its neighbors: bake and re-bake whole countries or the whole catalog, test on the fixture
+regions, and never describe a region by its relation to the maintainer.
 
 Defaults that make the safe path the easy one:
 
@@ -197,6 +207,14 @@ Defaults that make the safe path the easy one:
   search-time page warm (`warmPlaceWebViews`) is gone too since 2026-09-23: a tap's photos and
   details are single requests, and a hidden page loads only when a place needs one.
 - `./gradlew :core:test` runs the pure-logic unit tests (polyline, nav engine).
+- **Old-Android smoke test (2026-09-25, `old-android-smoke.yml` + `scripts/old-android-smoke.sh`):**
+  builds the per-chip release, installs the x86_64 APK (it carries Cronet's x86_64 library) on
+  Android 8.0 (API 26, minSdk) and Android 9 emulators, walks onboarding, runs a Davis search and
+  opens the place, and fails only on an `app.vela` crash or a native-library load failure. Run it
+  after any toolchain or native-dependency change by pushing to the `old-android-smoke` branch (or
+  from the Actions tab once it is on main). Android 8.0's emulator System UI crashes by itself when a
+  permission dialog covers the keyguard, so the script grants location up front; its crashes are
+  printed as a note, not a failure. First run: both pass on AGP 9.4, Kotlin 2.4 and Cronet 155.
 - **MapScreen is at the JVM 64 KB method limit (2026-09-13).** CI builds release only; the
   DEBUG variant (what the 4a runs) carries Compose source info and failed with "Method too
   large: MapScreenKt.MapScreen" while main built green. Four blocks are split out (same file,
@@ -326,8 +344,10 @@ Defaults that make the safe path the easy one:
   for real navigation.**
 - **GitHub releases are TWO different things - check the tag before touching one (2026-07-09).**
   `v0.*` tags are app releases (nightly prereleases, weekly stables). Every OTHER tag is
-  **infrastructure file hosting** (9 as of 2026-07-13): `tts-runtime` (the sherpa-onnx AAR CI
-  fetches at build time), `asr-models` (the on-device dictation engines: Whisper/SenseVoice/Moonshine), `routing-graphs` (region
+  **infrastructure file hosting** (9 as of 2026-07-13, plus `cronet-runtime` since 2026-09-25):
+  `tts-runtime` (the sherpa-onnx AAR CI fetches at build time), `cronet-runtime` (Chromium's own
+  prebuilt Cronet, one AAR per Chrome for Android version, CI fetches the one `gradle.properties`
+  pins), `asr-models` (the on-device dictation engines: Whisper/SenseVoice/Moonshine), `routing-graphs` (region
   graph zips + manifest), `poi-packs` (state place packs + manifest), `address-overlays`,
   `building-overlays` and `maxspeed-overlays` (PMTiles + manifests), `map-fonts` (Roboto glyph
   zip), `flock-cameras` (the ALPR/DeFlock camera dataset `.bin` + manifest, weekly-refreshed).
@@ -465,8 +485,17 @@ Defaults that make the safe path the easy one:
   when it finishes, which on a real phone wipes saved places, trips and permission grants (it did
   once, 2026-07-16, on the wired test phone). `.github/workflows/baseline-profile.yml` (monthly cron
   + dispatch) regenerates on a KVM emulator and opens a PR when the profile drifts.
-- Toolchain: AGP 8.10.1, Kotlin 2.1.0, Gradle
-  8.11.1, compileSdk 36 (`:app`; `:core` 35), targetSdk 35, minSdk 26, Java 17, Compose + Hilt + version catalog.
+- Toolchain: AGP 9.4.1, Kotlin 2.4.20, Gradle 9.8.0, KSP 2.3.12, Hilt 2.60.1, compileSdk 36 (every
+  module), targetSdk 35, minSdk 26, Java 17, Compose + Hilt + version catalog. **AGP 9 builds Kotlin
+  in (2026-09-25 upgrade):** there is no `org.jetbrains.kotlin.android` plugin and no `kotlinOptions`
+  block; Kotlin's JVM target follows `compileOptions` (17), and the Kotlin version is the one the
+  `kotlin.compose` / `kotlin.serialization` plugins put on the classpath. Two things the upgrade
+  shook out: AGP 9 checks AAR metadata for library modules too, so `:core` had to move to
+  compileSdk 36 (androidx.core 1.17 requires it; compileSdk changes no runtime behavior); and
+  Kotlin 2.4 no longer picks the three-argument `CancellableContinuation.resume(value) { _, _, _ -> }`
+  overload, so a resume whose cancellation handler does nothing is written
+  `cont.resumeWith(Result.success(Unit))`. Unit tests run for the debug variant only
+  (`:app:testDebugUnitTest`, `:core:testDebugUnitTest`).
 - Release signing from env: `VELA_KEYSTORE_PATH` / `VELA_KEYSTORE_PASSWORD` /
   `VELA_KEY_ALIAS` (default alias `vela`); falls back to debug keystore locally.
 - **No blocking IPC/IO from a composable body.** `SettingsScreen` used to call
@@ -712,7 +741,9 @@ Defaults that make the safe path the easy one:
   and MapScreen wraps EVERYTHING after the VelaMapView call in one `if (!pipUi)` gate, plus a
   banner for the small window in Google's shape (2026-09-13, was a one-line dark caption the user
   found hard to parse): the turn card's own `primaryContainer` green across the top with the
-  maneuver glyph, the distance as a bold headline and the turn text under it. NB the 4a
+  maneuver glyph, the distance as a bold headline and the turn text under it. Since 2026-09-25 a
+  second strip along the bottom carries the time left and the arrival clock, like Google's mini map
+  (distance was tried too and only ever showed as a trailing "..." at PiP width). NB the 4a
   (GrapheneOS, Android 14) never entered PiP under adb (Home key, home gesture, the window key,
   app-op "default"). Device-verified later the same day once the app-op was set to `allow` by hand
   (`adb shell appops set app.vela PICTURE_IN_PICTURE allow`; "default" did NOT enter PiP on that
@@ -1085,6 +1116,12 @@ Defaults that make the safe path the easy one:
   Cards with elevation 6dp, 54dp turn glyph, headlineMedium-bold distance, titleMedium-medium road
   name, FilledTonalIconButton for mute/steps. Keep new nav chrome on this treatment (no flat
   default-radius cards, no OutlinedIconButton circles - that was the "dated" look).
+  **Camera badges sit ABOVE the bubbles (2026-09-25, user drive: a bubble covered a Flock
+  camera).** The bubble layers used to be added at the very top of the style, so they were placed
+  first and drawn over the camera badges below them. The Flock, Flock-cluster and speed-camera
+  layers keep `iconIgnorePlacement(false)` and now go above the highest bubble layer
+  (`topNavBubbleLayer`), and a bubble layer created later goes below the lowest camera layer
+  (`CAMERA_BADGE_LAYERS`), so a camera claims its space first and a bubble dodges it.
   **2026-09-16: the bubbles are POINTS placed at the crossing.** The labels used to be the basemap
   `transportation_name` lines with `line-center` placement and an include-list filter, which put a
   bubble at the middle of the street's piece in the tile, often a block or more from the route
@@ -1449,7 +1486,12 @@ Defaults that make the safe path the easy one:
   default: Settings > Privacy "Block Google's page telemetry" (`web/GoogleTelemetry`, pref
   `block_google_telemetry`, works with the proxy on or off; the `webProxyBlockLogs` dial still
   overrides when set). Telemetry flows by default because a browser that never sends it looks less
-  like one, and session standing is what decides the limited view. Log lines: `carries:` / `answers locally:` / `passes through:`. The scrapers'
+  like one, and session standing is what decides the limited view. Log lines: `carries:` / `answers locally:` / `passes through:` / `untagged POST body:`.
+  Since 2026-09-25 the shim also carries BINARY bodies (Blob, ArrayBuffer, typed arrays, `Request`
+  objects, base64 over `putB64`) and CORS preflights go over Cronet (`OPTIONS`, 204 answered as
+  200): before that a place tap still leaked three header-carrying requests, all telemetry (a
+  binary `play.google.com/log` POST and the preflights for it and `ogads-pa`); after, zero on the
+  P9. The proxy costs ~0.2 s per review page load there (2.15 s vs 1.92 s). The scrapers'
   own bridges are random per process too since 2026-09-23 (`web/JsNames`): scripts keep writing
   `VelaBridge` / `VelaPanel` and `JsNames.of` swaps the real names in at every
   `evaluateJavascript`, so a new script call must go through `JsNames.of` or its bridge calls fail.
@@ -1464,6 +1506,24 @@ Defaults that make the safe path the easy one:
   `VelaSession: new Google session`. Also found: the 4a's weeks-old session was in Google's LIMITED
   view anyway (Google's banner on the full reviews page) while the P9's was full, so session
   standing, not age alone, decides it.
+- **REVIEW FEED PROBE (2026-09-25, `ReviewFeedProbeTest` + `.github/workflows/review-feed-probe.yml`).**
+  The feed (`qv9Egd`) stays off because it answered 0 reviews on the one full session tried, and its
+  parser was built only from limited-view replies. The probe sends the app's request from a clean
+  GitHub machine (push to the `feed-probe` branch, or dispatch), with the empty first-page token the
+  app sends and with a null one, and prints `FEEDPROBE|...|parsed=N|rawIds=M` per reply: rawIds
+  counts review ids in the raw text without the parser, so rawIds > parsed is a parse miss. The raw
+  replies are uploaded as an artifact. Never probe this from the maintainer's phones or network.
+  **Result (2026-09-25):** the clean machine got 5 reviews parsed from 5 (no parse miss); a full
+  session on a Pixel 9 got `[null,null,null,null,null,true,[true]]` over Cronet. The page's own
+  request, captured through the proxy (`debug.vela.tune.feedDump` 1 also saves it, `WebProxy`),
+  is the same body plus an `X-maps-bgkey` BotGuard token minted per request by Google's script;
+  the `[true]` flag is the answer a missing or spent token gets. The transport is fine. A full
+  session's feed needs Google's page, so the scrape stays the default. With `webProxy` on, the
+  page's own feed request (token included) went out through Cronet with NO `X-Requested-With` and
+  came back full: 10 reviews, a next-page token at payload[1], payload[6] `[false]`, and
+  `ReviewFeedParser` read all 10 with text and the token. The proxy also saves that reply under
+  `feedDump`. Replies land in
+  `files/feeddump/` on the phone; `adb shell setprop debug.vela.tune.feedDump ''` turns it off.
 - **VELA SAYS WHEN GOOGLE LIMITS IT (2026-09-25, `web/GoogleStanding`).** The limited view made the
   app look broken (#602: More reviews does nothing). `GoogleStanding.limited` is set only on strong
   evidence: the FIRST photo page returns at most `LIMITED_PHOTO_PAGE_MAX` (20) photos while a next
@@ -1486,7 +1546,11 @@ Defaults that make the safe path the easy one:
 - **A PLACE TAP IS A FEW REQUESTS, NOT A FEW HUNDRED (2026-09-23).** First photos: ONE `hspqX`
   request (`placePhotos`, dated), retried once after ~2.5 s when empty (a fresh Google session's
   first seconds answer stripped: seen 0, then 10), then the capped page walk as fallback. First
-  reviews: the capped page scrape BY DEFAULT; the ONE-request `qv9Egd` feed (`reviewFeed`,
+  reviews: the capped page scrape BY DEFAULT, and since 2026-09-25 only once the Reviews tab's area
+  is on screen (`MapViewModel.requestReviews` arms it, `ensureReviews` starts it from the tab's
+  clipped window bounds; the Google request counter measured that page at about 137 requests per
+  tap, some 90% of Vela's Google traffic, and most taps never scroll down to reviews; "Load all
+  photos and reviews" keeps the eager load); the ONE-request `qv9Egd` feed (`reviewFeed`,
   `ReviewFeedParser`) is behind `nativeReviewFeed` (compiled default 0) because it rides the app's
   in-memory session, new every launch, and Google limits new sessions to 5 reviews (measured on a
   healthy Pixel 9 whose aged WebView got the full list). `reviewsLimited` shows "Google is showing a
@@ -1505,8 +1569,8 @@ Defaults that make the safe path the easy one:
   logcat lines say which path each piece took. **Rollback levers** (`docs/book/07-talking-to-google.md`,
   "Place data: the methods"): calibration `tuning` `nativePlacePhotos` / `nativeReviewFeed` = 0 put the
   fleet back on the page paths with no release; a per-place cache (photos + feed 6 h, details 15 min)
-  makes a re-tap free; "More reviews" follows the feed's next-page token, which is ASSUMED to sit at
-  payload[1] and has not been seen in a capture yet (every capture was an end-of-list reply).
+  makes a re-tap free; "More reviews" follows the feed's next-page token, which sits at payload[1]
+  (seen in a full-session reply 2026-09-25: `"<base64>:10"`, payload[5] null, payload[6] `[false]`).
 - **Place-content toggles (2026-07-08):** `ShowReviews` / `LoadPhotos` reactive holders
   (`ui/PlaceContent.kt`, same shape as `LiveReviews`, init in VelaApp, rows in Settings → Places).
   They gate BOTH fetch (`fetchReviews`/`fetchPhotos` first line) and render (PlaceSheet `hasReviews`
@@ -3136,7 +3200,7 @@ architecture note.
 - **Bake joins must be HASH joins (2026-09-16).** Two correlated lookups that were free on the
   Davis box went effectively quadratic over a whole state: the tenant check (one EXISTS with three
   OR-ed tests) and the unit snap (a LATERAL lookup per stacked row). A world bake did 19 regions in
-  2.5 hours on them, and four west-coast state bakes were still running after an hour. Both are
+  2.5 hours on them, and four state bakes were still running after an hour. Both are
   now equi-joins with the ~200 m box as a residual: `tenants` is three joins (normalized address,
   lower(brand), `nhead` first word) UNIONed and DISTINCT, and the snap joins on (number, unit)
   and keeps the nearest by row_number. The AllThePlaces dedupe (#515) had the same shape - a
@@ -3219,6 +3283,25 @@ architecture note.
   `VoiceGuide.fasterRouteChime` (two RISING notes, the reroute chime falls) `FASTER_CHIME_LEAD_MS`
   before the spoken line, and the card wears `secondaryContainer` with a primary pill like the
   update card and its own countdown bar (it was the one tertiary card in the stack).
+- **"Can't stream" means offline OR a network that never VALIDATED (2026-09-26, user's head unit:
+  roads for a moment at start, then gray with places on top, a whole state downloaded).** A head
+  unit on a car Wi-Fi or a hotspot with no data reports INTERNET capability, `isOnline()` called
+  that online, and `pickBasemapArchive` applied the online rules (drop a shallow archive, keep an
+  archive only while the whole view is inside it) in favor of streamed tiles that could not load.
+  The basemap pick now uses `offline || !isValidated()`, a validation change re-runs it, and the
+  decision (offline, validated, shallow, glyphs) is recorded as a `basemap` diagnostics event.
+  Everything else still keys on `isOnline()`.
+  **The same report's real cause was the fresh mount (fixed the same day):** offline, a
+  `installedFor` with nothing but the world archive mounted still ran the online test (roads at the
+  ring AND every viewport corner), so one corner over a lake or forest mounted the WORLD archive
+  (states and borders, no roads) and the keep rule, which skips the world archive, never let the
+  state back. Offline now mounts the smallest installed archive whose roads touch the view at all.
+  Reproduced and verified on the 4a in airplane mode at a lakeshore downtown.
+- **A region's Update marks its row for the WHOLE update (2026-09-25, head unit report):**
+  `MapUiState.regionUpdatingId`, set in `updateRegion` and cleared in its `finally`. The row's
+  spinner used to key only on a routing or place-pack download, so an update that was only the
+  places file or the map ran with the Update button still showing and nothing moving until the map
+  card noticed. `refreshArchive` reports its progress (step 1 places, 2 map) and honors Cancel now.
 - **A REGION DOWNLOAD IS ONE FLOW UNDER ONE CARD (2026-09-23, user report).** `downloadRoutingGraph`
   runs obf, then the place pack (`downloadPoiPack(chained = true)`, which neither clears the card nor
   says "ready"), then the places file and the map (`fetchRegionArchives`, step 1 / 2, percent on
@@ -3889,6 +3972,45 @@ Gotchas:
   before bumping), and google.com's `Accept-CH` asks for `Downlink` and `RTT`, which Chrome then
   sends on every later request, so the XHR header set carries both. Probe recipe and residuals
   (X-Client-Data, two cookie jars, TLS) are in SPEC 3.6.
+- **Reading what actually goes on the wire (2026-09-25):** `adb shell setprop debug.vela.tune.netLog 1`
+  (read at app start) makes Cronet write a NetLog of its first 90 s to `files/netlog/` (cookies
+  stripped; request AND response headers, including every `Accept-CH` Google sends) and opens the
+  WebViews to the remote inspector (`adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`,
+  CDP `Network.requestWillBeSentExtraInfo` gives the real headers). The reference is a real Chrome
+  on a throwaway profile (`--user-data-dir`, `--remote-debugging-port`, run once so it fetches its
+  variations seed). Strip `/@lat,lng` from any page URL before printing: Google puts the session's
+  location there. Clear the switch after.
+- **Header fidelity pass against a real Chrome (2026-09-25, SPEC 3.6):** real Chrome 154 was captured
+  beside our Cronet and WebView. Fixed: one `Accept-Language` for both clients
+  (`BrowserHeaders.acceptLanguage`, set in `AppLocale.wrap` from `LocaleList.getDefault()`), live
+  `Downlink`/`RTT` from Cronet's network-quality estimator, navigations at `u=0`, the WebView's real
+  full version (`Calibration.chromeFullVersion`, checked daily by `check-chrome-ua.py`) and `Desktop`
+  form factor, and the proxy filling in `Sec-Fetch-*` and `Sec-CH-UA` that the WebView never hands
+  it (`BrowserHeaders.fetchMetadata`). NOT fixable honestly: `X-Client-Data` and
+  `x-browser-validation`, both sent by every real Chrome to Google and by neither of our clients;
+  and `zstd`, which Cronet strips (143 and 155 alike). When a new Chrome ships, bump `chromeFullVersion` with
+  `userAgent` (the script prints both).
+- **The offline area picker (2026-09-25, issue #609, book chapter 8):** `startAreaPick` /
+  `AreaPickOverlay` / `downloadPickedArea`. The frame's insets (`AREA_FRAME_*`) are shared by the
+  overlay and `framedBounds`, so change them together. Full detail at any framing zoom (floor(zoom)-2
+  to 16, the vector tiles stop at 14); estimate from the region archive's density; cap
+  `AREA_MAX_TILES`. The `geo:` intent ignores `z`, so test zoom with the picker's own -/+ buttons
+  (shown for D-pad and "Prefer buttons over swipes").
+- **Every Google request goes through the shared OkHttp client (2026-09-25).** That client's
+  `GoogleTransport.hook` counts it (Settings > Privacy > Requests to Google, `core/net/GoogleUsage`)
+  and hands it to Cronet. Coil's image loader used a default client of its own and fetched every
+  Google photo as `okhttp/4.12.0`; it now takes the shared client with
+  `GoogleTransport.imageHeaders` in front. A new HTTP client that can reach Google breaks both the
+  count and the browser identity: derive it from the shared one. The first reading showed the hidden
+  reviews page as about 90% of Google traffic (about 137 requests per place tap).
+- **Never add a Google request value that every install sends identically (2026-09-25,
+  `core/data/google/RequestShape`, SPEC 3.6).** A marker audit found five: `_reqid=1` on photo
+  requests, `ech=1` on every autocomplete keystroke, `callback=cb` on Street View, the captured span
+  `25229.167291701906` on the ambient/details/popular-times searches (and whole-number spans
+  elsewhere), and a directions viewport frozen on Davis for every trip anywhere. Each now comes from
+  `RequestShape` (per-session counters, random names, `span()`, `fitDirections()`). When a new
+  template is captured, look at every number and token in it and ask whether the page would send
+  the same one from another machine; if not, derive it per request.
 - **`secChUa` is COMPUTED from the UA's major (2026-09-23, `BrowserHeaders.secChUaFor`).** Chrome
   derives the whole header (GREASE brand, its version, the order) from the major, so a hand-edited
   hint is a guess; the 153 one was Chrome 137's pattern with the number changed. `parseBundle`
@@ -3912,8 +4034,15 @@ Gotchas:
 - **Google requests ride Cronet now (2026-09-23), a stock Chromium library, not a custom TLS stack.**
   `core/net/GoogleTransport.hook` (in CoreModule's client) hands google.com hosts to
   `app/net/CronetTransport` (`useCronet`, default on; OkHttp on any failure, a GoogleTransport
-  IOException falls back). `:osmand-shaded` relocates OsmAnd's bundled protobuf at build time so
-  Cronet's can coexist (one runtime for both is NOT an option: each was compiled against its own).
+  IOException falls back). **Since 2026-09-25 the Cronet is Chromium's OWN prebuilt build of the
+  Chrome for Android stable Vela claims** (`gradle.properties` `vela.cronetVersion`, 155.0.8059.16),
+  packed by `scripts/build-cronet-aar.sh` from the public `chromium-cronet` bucket into
+  `app/libs/cronet-<v>.aar` (gitignored; `cronet-build.yml` publishes it weekly to `cronet-runtime`,
+  CI fetches it or packs it on the spot). Bump `vela.cronetVersion` when the UA's major moves; a
+  local build needs the AAR first (docs/BUILDING.md). Its jars are Java 25 class files (major 69);
+  AGP 9.4's R8 reads them (AGP 8.10's could not, and needed a pinned R8 for the one day in between).
+  Never go back to Maven's `cronet-embedded` (frozen at 143). Its protobuf is shaded inside the jars;
+  `:osmand-shaded` still relocates OsmAnd's own copy, which the Maven 143 needed.
   Cronet's native library ships for ARM only (`packaging.jniLibs` excludes `x86*/libcronet*.so`):
   the APK keeps all four ABIs, so emulators and x86 Chromebooks install and run, and there
   `CronetHolder` fails to load the library once and every Google request stays on OkHttp. 108.4 MB,

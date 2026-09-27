@@ -443,24 +443,72 @@ Constraints:
 - The compiled UA tracks Chrome's CURRENT stable on Windows (chromiumdash `fetch_releases`,
   channel Stable, platform Windows); it was one major ahead of stable for a week, which is a
   browser that does not exist. Recalibrate it to the shipping major, not the next one.
-- google.com's `Accept-CH` asks for `Downlink` and `RTT` only (checked 2026-09-22), so the XHR
-  header set carries both (`Downlink: 10`, `RTT: 50`, Chrome's rounded values on a good link) and
-  the document fetch does not, the order a real session has. The high-entropy UA hints are not
-  requested there, so only the low-entropy three matter and the WebView metadata's full version,
-  platform version and architecture are plausible rather than load-bearing.
-- Residuals that are not fixed and not worth chasing: Chrome sends `X-Client-Data` (its
-  variations proto) to Google origins and neither client here does; the WebView and OkHttp keep
-  separate cookie jars, so one phone is two sessions from one IP; the two clients differ in the
-  TLS and HTTP/2 fingerprints below.
+- google.com's `Accept-CH` asks for `Downlink` and `RTT` on documents (checked 2026-09-22), so the
+  XHR header set carries both and the document fetch does not, the order a real session has. Over
+  Cronet the values come from its network-quality estimator (enabled on the engine), scaled by a
+  per-host noise factor of 0.9 to 1.1 and rounded as Chrome rounds them (`BrowserHeaders.rttHint`:
+  50 ms steps, capped at 3000; `downlinkHint`: 50 kbps steps in Mbps, capped at 10); `10` / `50`
+  remain until the estimator has a value and on the OkHttp fallback. Data-call responses also send
+  an `Accept-CH` for the high-entropy set, which Chrome ignores on a subresource, so data calls
+  carry the low-entropy three only; Chrome 154 was captured doing exactly that (2026-09-25).
+- The WebView's high-entropy hints carry the real Chrome build (`Calibration.chromeFullVersion`,
+  `155.0.8059.12`, checked by `check-chrome-ua.py`; `BrowserHeaders.fullVersionFor` falls back to
+  `<major>.0.0.0` when the pushed value is not a build of the UA's major), the GREASE brand keeps
+  `<n>.0.0.0`, and form factors say `Desktop`, as Chrome 154 sent them.
+- `Accept-Language` is one value for both clients: the app sets `BrowserHeaders.acceptLanguage` from
+  `LocaleList.getDefault()` (the list the WebView reads) through `acceptLanguageFor`, Chrome's
+  expansion (each tag, then its bare language unless the next tag shares it, q from 0.9 down by 0.1).
+  Before, native requests always said `en-US` while a WebView in another language said its own.
+- Cronet sends a navigation at `REQUEST_PRIORITY_HIGHEST` (`Priority: u=0, i`, Chrome's document
+  value). It cannot send `zstd`: Chrome 155 offers `gzip, deflate, br, zstd`, and Cronet (143 and
+  155 alike) advertises only `gzip, deflate, br` and strips `zstd` from a caller's `Accept-Encoding`.
+  Its zstd decoder is compiled in but behind a Chromium feature that Cronet only takes from a
+  system-provided flags file, not from the app.
+- **Every Google request is counted on the phone** (`core/net/GoogleUsage`, 2026-09-25): the shared
+  client's `GoogleTransport.hook` records each request to a Google host (google.com, googleapis.com,
+  gstatic.com, googleusercontent.com, ggpht.com) by purpose, from the caller's `GoogleUsage.Kind`
+  tag or `kindOf(url)`; hidden page loads count at `HiddenWebView.request` / `ReviewsPanel`, and
+  everything a Google page loads after that at `WebProxy.intercept` (called with the proxy on or
+  off). `app/diag/GoogleUsageStore` keeps 14 days in its own prefs, Settings > Privacy shows today
+  and the week, and the diagnostics export carries `googleRequests`. Not counted: MapLibre's own
+  tile fetches (traffic raster, the satellite fallback). First reading on a Pixel 9, a few searches
+  and two place taps: 309 requests, 274 of them loaded by the hidden reviews page (about 137 per
+  tap), against about 35 of Vela's own.
+- **Photos load over the shared client** (2026-09-25): Coil used its own default OkHttp client, so
+  every Google photo went out as `okhttp/4.12.0` with no browser headers over OkHttp's handshake.
+  The image loader now takes the shared client with `GoogleTransport.imageHeaders` in front (Chrome's
+  image-load headers on googleusercontent.com / ggpht.com / gstatic.com: `Sec-Fetch-Dest: image`,
+  cross-site, Referer `https://www.google.com/`, no network hints), and `GoogleTransport.carries`
+  covers every Google host, so those images ride Cronet too.
+- **No value that every install sends identically** (marker audit 2026-09-25, `RequestShape`): a
+  constant shared by all of Vela is a filter that catches Vela and nothing else, which is worse than
+  any "not quite Chrome" difference. Fixed: batchexecute `_reqid` starts random per process and adds
+  100000 per call (was `_reqid=1` on every photo request and an unrelated random number per feed
+  request); the photo request is localized, carries a `gl`, encodes `source-path` and ends its body
+  with `&` as the page's does; autocomplete's `ech` counts up per request (was `1` on every
+  keystroke); the Street View lookup's JSONP callback is `_xdc_._<6 random>` (was `cb`); every map
+  span (`!1d`) is a long decimal within 0.2% of the asked value (`RequestShape.span`; it was the
+  template's captured `25229.167291701906` on the ambient, details and popular-times requests, or a
+  whole number, which no map produces); and the directions request's map viewport is centered on the
+  trip and spans it (`RequestShape.fitDirections`; the captured template froze it on Davis, so every
+  Vela directions request anywhere claimed a map over Davis). Left alone: the dead
+  `listentitiesreviews` template still says `!1svela`, and nothing sends it.
+- Residuals that are not fixed: Chrome sends `X-Client-Data` (its variations proto) and four
+  `x-browser-*` headers (`channel`, `copyright`, `year` and `validation`, a hash of the Chrome
+  build) on every Google request, a fresh profile included, and neither client here sends any of
+  them. A shared fake `X-Client-Data` would be a fleet-wide fingerprint, and `x-browser-validation`
+  cannot be produced without Chrome's own key, so both stay absent (incognito Chrome omits
+  `X-Client-Data` too). The WebView and OkHttp keep separate cookie jars, so one phone is two
+  sessions from one IP; the two clients differ in the TLS and HTTP/2 fingerprints below.
 - Measured 2026-09-23 (tls.peet.ws, `ja4` / `peetprint` / HTTP/2 `akamai_fingerprint`):
   desktop Chromium 152 on macOS and the Android WebView (Chromium 153) send the SAME ClientHello
   and the same HTTP/2 settings (`t13d1516h2_8daaf6152771_806a8c22fdea`,
   `1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p`), so a desktop UA over a Chromium stack is
   coherent. OkHttp is unmistakable: `t13d1513h2_8daaf6152771_eca864cca44a`, no GREASE, no ECH
-  or ALPS, HTTP/2 `4:16777216|16711681|0|m,p,a,s`. Cronet 143 (the newest Chromium-licensed
-  `cronet-embedded` on Maven; the 500.x artifacts carry the SDK license) matches Chromium 153
-  except for three signature algorithms newer Chromium offers (0x0904-0x0906, ML-DSA), which moves
-  its `ja4` to `..._d8a2da3f94cd`.
+  or ALPS, HTTP/2 `4:16777216|16711681|0|m,p,a,s`. Cronet 143 (Maven's last Chromium-licensed
+  `cronet-embedded`) matched Chromium 153 except for three signature algorithms newer Chromium
+  offers (0x0904-0x0906, ML-DSA), which moved its `ja4` to `..._d8a2da3f94cd`; that was the reason
+  to ship the current Cronet (below).
 - The browser window a request describes is per install (`BrowserViewport`, 2026-09-23): the search
   and directions `pb` carry the map's pixel size (`!3m2!1i<w>!2i<h>`) and four rectangles the page
   chrome covers (under `!30m28` in search, `!20m28` in directions), captured from one 1024x768
@@ -475,21 +523,33 @@ Constraints:
 - **Google-host requests go over Cronet (2026-09-23),** Chromium's own network stack, not a
   custom TLS stack: `core/net/GoogleTransport` hands only google.com hosts to the interceptor the
   app installs (`app/net/CronetTransport`, calibration `useCronet`, default on); everything else,
-  and any Cronet failure, stays on OkHttp. `cronet-embedded` 143 (Chromium license). In the
-  all-in-one APK Cronet's native library is packaged for arm64-v8a and armeabi-v7a only (the
-  per-chip x86 APKs carry their own); on x86 and x86_64 (emulators, a few
-  Chromebooks) the engine fails to load once and Google requests stay on OkHttp. The APK keeps all
-  four ABIs at 108.4 MB, against 98.0 MB before Cronet and 121.9 MB with it on every ABI. Its protobuf-javalite sits beside OsmAnd's old bundled
-  protobuf because `:osmand-shaded` relocates OsmAnd's copy to `net.osmand.shaded.protobuf` at build
-  time (the jar on the `obf-runtime` release is untouched). On a Pixel 9 Google answers it over
-  HTTP/3. Its handshake is Chrome's minus the three newest signature algorithms until the Cronet
-  build tracks Chrome's major (`cronet-build.yml`).
+  and any Cronet failure, stays on OkHttp. **The Cronet is Chromium's own prebuilt Release build for
+  the Chrome for Android stable version pinned in `gradle.properties` `vela.cronetVersion`
+  (155.0.8059.16 since 2026-09-25), the same major the UA claims.** Chromium's official Cronet
+  builders publish every version to the public `chromium-cronet` bucket
+  (`storage.googleapis.com/chromium-cronet/android/<v>/Release/cronet/`);
+  `scripts/build-cronet-aar.sh` packs the API, common, native, sentinel, shared and HttpEngine-provider
+  jars, the four ABIs' `libcronet.<v>.so`, Chromium's ProGuard rules and its LICENSE into one AAR
+  (`app/libs/cronet-<v>.aar`, gitignored); `cronet-build.yml` publishes it weekly to the
+  `cronet-runtime` infra release and CI fetches the pinned one from there (falling back to packing it
+  from the bucket). Maven's `cronet-embedded` stopped at 143. Chromium compiles these jars as Java 25
+  class files (major 69), which AGP 9.4's R8 reads (AGP 8.10's refused them). Protobuf is shaded inside the jars (`org.chromium.net.internal`), so there is
+  no clash with OsmAnd's. In the all-in-one APK Cronet's native library is packaged for arm64-v8a and
+  armeabi-v7a only (the per-chip x86 APKs carry their own); on x86 and x86_64 (emulators, a few
+  Chromebooks) the engine fails to load once and Google requests stay on OkHttp. Checked on a
+  Pixel 4a: `Cronet/155.0.8059.16` loads under R8, Google answers over HTTP/3, the proxy and the
+  place sheet behave as before; the APK grew 0.7 MB. The engine is an `ExperimentalCronetEngine`
+  with the network-quality estimator on (its estimates feed `Downlink` / `RTT`). Bump
+  `vela.cronetVersion` with the claimed Chrome major.
 - **The WebView proxy** (`app/web/WebProxy`, calibration `webProxy`, default OFF): a Google WebView's
   GETs go out over Cronet, streamed, with the WebView's OWN cookies (`WebViewCookieJar`, so the page
   keeps its aged session), which removes `X-Requested-With: app.vela`. POSTs reach the proxy through
   a document-start shim (`WebProxy.SHIM`) that tags each XHR, fetch or sendBeacon with a one-time id
-  and hands its body over a randomly named JS interface; a body that is not plain text (FormData,
-  Blob) still goes out from the WebView with the header. Page telemetry is answered locally with an
+  and hands its body over a randomly named JS interface: plain text as is, a Blob, ArrayBuffer, typed
+  array or `Request` as base64 (`putB64`). CORS preflights (`OPTIONS`) to a Google host go out over
+  Cronet too, a 204 answered to the page as 200. What the shim cannot read (FormData) still goes out
+  from the WebView with the header and is logged `untagged POST body:`. Measured on a Pixel 9 place
+  tap, the proxy adds ~0.2 s to the review page's load (about 2.15 s against 1.92 s, three each). Page telemetry is answered locally with an
   empty 200 only when the user turns on Settings > Privacy "Block Google's page telemetry"
   (`web/GoogleTelemetry`, default off, works with the proxy on or off; the `webProxyBlockLogs` dial
   overrides when set), because a browser that never sends it looks less like one. Measured neutral on page timing once the response streams.
@@ -510,17 +570,23 @@ Constraints:
 each photo dated), one jittered ~2.5 s retry when it answers empty (a new Google session's first
 seconds are stripped), up to three tries; after three empty answers the sheet keeps the search's hero
 photo and the page walk waits for a tap on "More photos".
-Reviews: the page scrape capped at `FIRST_REVIEWS` (10). The one-request `qv9Egd` feed
+Reviews: the page scrape capped at `FIRST_REVIEWS` (10), started only when the Reviews tab's area is
+on screen (`requestReviews` / `ensureReviews`, its clipped window bounds, 2026-09-25): that page
+costs about 137 Google requests, most taps never reach the reviews, and until then the tab shows its
+loading state. `FullPlaceLoad` keeps the eager load. The one-request `qv9Egd` feed
 (`reviewFeed`) is behind `nativeReviewFeed` (compiled default 0): Google limits NEW anonymous
-sessions to five reviews and no paging, and the feed returned 0 reviews even on the aged WebView
-session it now rides (`aged = true`), while the page scrape on that session gets the full list. Both RPCs need
+sessions to five reviews and no paging, and a full (aged) session answers a plain request with an
+empty list and a `[6] = [true]` flag: it requires the `X-maps-bgkey` BotGuard token that Google's
+page script mints per request (single use), which a native request cannot produce. The page scrape
+on that session sends the token and gets the full list. Both RPCs need
 `Calibration.rpcContext` as `x-maps-diversion-context-bin`. Details are fetched only when the
 search reply lacks popular times, a review count, an address or weekly hours. "More photos" runs the full walk (Menu tab) with the dates join. No hidden page is
 warmed after a search, and the ambient neighbor prefetch runs in Google-only mode. Settings >
 Performance "Load all photos and reviews" (`FullPlaceLoad`) restores the full walk and 50 reviews.
 Details use ONE plain request of the details page's own search (`MapDataSource.placeDetails`,
 parsed by `PopularTimesParser`) with up to three tries while popular times are missing, the page
-only as a last resort (`nativeDetails`). "More photos" pages `hspqX` natively: 50 are asked for
+only as a last resort (`nativeDetails`). Each reply is merged into the sheet as it lands (`mergeDetails`);
+only popular times wait on the retries. "More photos" pages `hspqX` natively: 50 are asked for
 (`PHOTO_COUNT`; a full session answers 50, a limited one 10, see limited-view detection), the
 cursor is reply payload[5] and goes back at request `[4][2][2]`; payload[1] is not the photo total
 (it reads the same for unrelated places) and is not read. The RPC tags no category, so the Menu tab comes only from the page walk. The per-place requests
@@ -1922,6 +1988,13 @@ Selection rules on the phone:
   the mounted archive is no longer kept until the center leaves its data: it is in use exactly
   while the ring and the corners are all inside it, so a border on screen means streaming and a
   pan along the border reloads nothing.
+  Offline a FRESH mount follows the same loose rule: the smallest installed archive whose box
+  holds the center or a viewport corner and whose roads reach the center tile, the ring or a
+  corner is mounted, and the world archive is used only when none does. The strict online test
+  (roads at the ring and every corner) used to run for offline fresh mounts too, so one corner over
+  a lake, a forest or the sea mounted the world archive, and with the world archive mounted the
+  keep rule never applied again: a whole state downloaded, and the map showed only borders and
+  places, for the whole drive. "Offline" here is `offline || !isValidated()`.
 - **A global low-zoom archive is the floor under the pick** (`BasemapTileStore.WORLD_ID`, baked by
   `world-lowzoom.yml`, about 11 MB at z0-7, pulled once alongside the first offline download). It is
   kept OUT of the per-region candidate list: it covers every point on earth, and it carries no
@@ -2819,8 +2892,8 @@ tooling default that claims otherwise. Before pushing, `git log origin/main..HEA
 
 ## 15. Build, release and distribution
 
-- **Toolchain**: AGP 8.10.1, Kotlin 2.1.0, Gradle 8.11.1, compileSdk 36, targetSdk 35, minSdk 26,
-  Java 17,
+- **Toolchain**: AGP 9.4.1 (Kotlin built in, no `kotlin-android` plugin), Kotlin 2.4.20, Gradle 9.8.0,
+  KSP 2.3.12, Hilt 2.60.1, compileSdk 36 in every module, targetSdk 35, minSdk 26, Java 17,
   Compose, Hilt, a version catalog, R8 in the `release` build type.
 - **Channels.** A push to `main` or `canary` builds and tests only; a push can never mint a
   release. The nightly prerelease `v0.4.<run>` (versionName `0.4.<run>`, versionCode

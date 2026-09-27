@@ -238,6 +238,8 @@ data class MapUiState(
     // the place's own sheet, and closing the results returns to the directions panel.
     val alongRouteDest: Place? = null,
     val pickOnMap: MapPick? = null,          // "Choose on map" crosshair mode is active for this endpoint
+    val areaPicking: Boolean = false,        // the offline area picker's frame is over the map (issue #609)
+    val areaPick: MapViewModel.AreaPlan? = null, // its live estimate for the framed area
     val travelMode: TravelMode = TravelMode.DRIVE,
     // Depart/arrive time for directions: 0 = leave now, 1 = depart at, 2 = arrive by, 3 = last available;
     // [directionsTimeEpochSec] is the chosen wall-clock (null when "now"). Drives the transit re-fetch at
@@ -382,6 +384,11 @@ data class MapUiState(
     // with its percent. Non-null keeps the region card up; the card used to vanish after the place
     // pack while the map (the biggest piece) kept downloading unseen.
     val regionFileStep: Int? = null,
+    /** The region whose Update is running, whatever it contains (its row shows a spinner, Cancel
+     *  and progress). Before this only a routing file or place pack download marked the row, so a
+     *  places-only or map-only update left the Update button sitting there (user's head unit,
+     *  2026-09-25). */
+    val regionUpdatingId: String? = null,
     val regionFilePct: Int = 0,
     val poiPackInstalledIds: Set<String> = emptySet(),
     val poiPackRegions: List<app.vela.offline.RoutingRegion> = emptyList(), // the pack catalog (revs/deltas)
@@ -1621,7 +1628,7 @@ class MapViewModel @Inject constructor(
             if (full != null && _state.value.selected?.id == sp.id) {
                 val enriched = full.copy(id = sp.id)
                 _state.update { it.copy(selected = enriched) }
-                fetchReviews(enriched)
+                requestReviews(enriched)
                 fetchPhotos(enriched)
                 // The enriched place now has an address, so the WebView detail fetch can
                 // do its specific name+address query — without this, popular times +
@@ -1858,6 +1865,8 @@ class MapViewModel @Inject constructor(
      *  updates on every network change; fails safe to "online" so a quirk never falsely grays the app. */
     private var offlineLatchJob: Job? = null
 
+    private var lastValidated: Boolean? = null
+
     private fun observeConnectivity() {
         val cm = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return
         fun refresh() {
@@ -1869,6 +1878,10 @@ class MapViewModel @Inject constructor(
                 _state.update { it.copy(lowData = constrained) }
             }
             val off = !isOnline()
+            // A network that starts or stops reaching the internet re-decides the map picture
+            // (refreshBasemapArchive treats an unvalidated network as offline).
+            val validated = isValidated()
+            if (validated != lastValidated) { lastValidated = validated; refreshBasemapArchive() }
             if (!off) {
                 // Online applies IMMEDIATELY (and cancels a pending offline latch).
                 offlineLatchJob?.cancel()
@@ -1932,6 +1945,14 @@ class MapViewModel @Inject constructor(
      *  the same "nothing to ask" path either way. NOT [offlineNow] itself: that one also decides
      *  routing and basemap fallbacks, which must keep using the open services while online. */
     private fun googleOff(): Boolean = offlineNow() || app.vela.ui.GoogleFree.on.value
+
+    /** The default network has actually reached the internet (Android's VALIDATED). A head unit on
+     *  a car Wi-Fi or a hotspot with no data has INTERNET capability without it. */
+    private fun isValidated(): Boolean = runCatching {
+        val cm = appContext.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork ?: return false) ?: return false
+        caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }.getOrDefault(true)
 
     private fun isOnline(): Boolean = runCatching {
         val cm = appContext.getSystemService(android.content.Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
@@ -2380,7 +2401,7 @@ class MapViewModel @Inject constructor(
                 stopDepartures = null, stopDeparturesLoading = false, stopDeparturesFor = null,
             )
         }
-        fetchReviews(p)
+        requestReviews(p)
         fetchPhotos(p)
         fetchPlaceDetails(p)
         fetchStopDepartures(p)
@@ -2905,45 +2926,51 @@ class MapViewModel @Inject constructor(
             fun complete(f: app.vela.core.model.PlaceDetails?) = f != null && (f.popularTimes != null || f.reviewCount != null)
             val fidKey = p.featureId
             val cachedDetails = fidKey?.let { placeCacheGet(detailsCache, it, DETAILS_CACHE_MS) }
-            var focused = if (cachedDetails == null && tuneOn("nativeDetails")) focusedSearch() else null
+            // Each reply is shown as it lands; only popular times wait on the retries.
+            var focused = if (cachedDetails == null && tuneOn("nativeDetails")) focusedSearch()?.also { mergeDetails(p, it) } else null
             if (placeTries() >= 2 && cachedDetails == null && tuneOn("nativeDetails") && focused?.popularTimes == null) {
                 delay(placeRetryWait(1))
                 if (_state.value.selected?.id != p.id) return@launch
-                focused = focusedSearch()
+                focused = focusedSearch()?.also { mergeDetails(p, it) } ?: focused
             }
             if (placeTries() >= 3 && cachedDetails == null && tuneOn("nativeDetails") && focused?.popularTimes == null) { // third and last
                 delay(placeRetryWait(2))
                 if (_state.value.selected?.id != p.id) return@launch
-                focused = focusedSearch()
+                focused = focusedSearch()?.also { mergeDetails(p, it) } ?: focused
             }
             val native = focused?.takeIf { complete(it) }
             android.util.Log.i("VelaPlaceLoad", "details: missing $missing; ${when { cachedDetails != null -> "cache"; native != null -> "plain search${if (native.popularTimes == null) " (no popular times at this place)" else ""}"; else -> "details page" }}")
             val d = cachedDetails ?: (native ?: runCatching { webPopularTimes.fetch(p) }.getOrNull())
                 ?.also { if (fidKey != null) placeCachePut(detailsCache, fidKey, it) }
-            _state.update { st ->
-                val sel = st.selected
-                if (sel?.id != p.id) st else st.copy(
-                    loadingDetails = false,
-                    selected = if (d == null) sel else sel.copy(
-                        popularTimes = sel.popularTimes ?: d.popularTimes,
-                        editorialSummary = sel.editorialSummary ?: d.editorialSummary,
-                        ownerDescription = sel.ownerDescription ?: d.ownerDescription,
-                        // Backfill only what the summary left blank; take the fuller hours list.
-                        rating = sel.rating ?: d.rating,
-                        reviewCount = sel.reviewCount ?: d.reviewCount,
-                        hours = if (d.hours.size > sel.hours.size) d.hours else sel.hours,
-                        address = sel.address?.ifBlank { null } ?: d.address,
-                        phone = sel.phone ?: d.phone,
-                        website = sel.website ?: d.website,
-                        statusText = sel.statusText ?: d.statusText,
-                        openNow = sel.openNow ?: d.openNow,
-                        priceText = sel.priceText ?: d.priceText,
-                        priceLevel = sel.priceLevel ?: d.priceLevel,
-                        about = sel.about.ifEmpty { d.about },
-                        featuredReview = sel.featuredReview ?: d.featuredReview,
-                    ),
-                )
-            }
+            if (d != null) mergeDetails(p, d)
+            _state.update { st -> if (st.selected?.id != p.id) st else st.copy(loadingDetails = false) }
+        }
+    }
+
+    /** Fill what the selected place is missing from [d]; the fuller hours list wins. */
+    private fun mergeDetails(p: Place, d: app.vela.core.model.PlaceDetails) {
+        _state.update { st ->
+            val sel = st.selected
+            if (sel?.id != p.id) st else st.copy(
+                selected = sel.copy(
+                    popularTimes = sel.popularTimes ?: d.popularTimes,
+                    editorialSummary = sel.editorialSummary ?: d.editorialSummary,
+                    ownerDescription = sel.ownerDescription ?: d.ownerDescription,
+                    // Backfill only what the summary left blank; take the fuller hours list.
+                    rating = sel.rating ?: d.rating,
+                    reviewCount = sel.reviewCount ?: d.reviewCount,
+                    hours = if (d.hours.size > sel.hours.size) d.hours else sel.hours,
+                    address = sel.address?.ifBlank { null } ?: d.address,
+                    phone = sel.phone ?: d.phone,
+                    website = sel.website ?: d.website,
+                    statusText = sel.statusText ?: d.statusText,
+                    openNow = sel.openNow ?: d.openNow,
+                    priceText = sel.priceText ?: d.priceText,
+                    priceLevel = sel.priceLevel ?: d.priceLevel,
+                    about = sel.about.ifEmpty { d.about },
+                    featuredReview = sel.featuredReview ?: d.featuredReview,
+                ),
+            )
         }
     }
 
@@ -3203,6 +3230,35 @@ class MapViewModel @Inject constructor(
     /** Pull full reviews for a place by its Google feature id (best-effort,
      *  applied only if it's still the selected place when they arrive). */
     private var reviewsJob: Job? = null
+
+    /**
+     * The reviews for [p], loaded only once the Reviews tab is on screen (2026-09-25). The inline
+     * reviews come from a hidden Google page, and the Google request counter measured that page at
+     * about 137 requests per place tap, around 90% of Vela's Google traffic, while most taps never
+     * scroll down to the reviews. So a tap arms it ([reviewsPendingFor], shown as loading) and
+     * [ensureReviews], called when the tab's area comes into view, starts it. Settings >
+     * Performance "Load all photos and reviews" ([app.vela.ui.FullPlaceLoad]) keeps the old eager load.
+     */
+    private fun requestReviews(p: Place) {
+        if (app.vela.ui.FullPlaceLoad.on.value) { reviewsPendingFor = null; fetchReviews(p); return }
+        if (!app.vela.ui.ShowReviews.on.value || googleOff()) return
+        reviewsJob?.cancel()
+        reviewsPendingFor = p
+        // Loading, not empty: the tab must never flash "no reviews" before it has asked.
+        _state.update { it.copy(reviews = emptyList(), reviewsLoading = !p.featureId.isNullOrBlank(), reviewsFound = 0, reviewsLimited = false, reviewsNextToken = null, reviewsMoreLoading = false) }
+    }
+
+    /** The Reviews tab is on screen: start the reviews armed by [requestReviews] for the place still
+     *  open. Idempotent; a place that changed in between is dropped. */
+    fun ensureReviews() {
+        val p = reviewsPendingFor ?: return
+        val sel = _state.value.selected
+        reviewsPendingFor = null
+        if (sel == null || (sel.id != p.id && sel.featureId != p.featureId)) return
+        fetchReviews(sel)
+    }
+
+    private var reviewsPendingFor: Place? = null
 
     private fun fetchReviews(p: Place, force: Boolean = false) {
         // "Show reviews" off: no review section is rendered, so don't scrape either.
@@ -3895,7 +3951,7 @@ class MapViewModel @Inject constructor(
                         tapResolvingFor = null, sheetAlias = full.id to placeholder.id,
                     )
                 }
-                fetchReviews(full)
+                requestReviews(full)
                 fetchStopDepartures(full) // issue #71: a bus stop / station tapped on the MAP gets its board too
                 // Photos and popular times are two more Chromium page loads; a beat later, so they
                 // do not land under the sheet's open animation together with the reviews scrape.
@@ -5995,6 +6051,7 @@ class MapViewModel @Inject constructor(
 
     fun onViewport(south: Double, west: Double, north: Double, east: Double, zoom: Double) {
         viewport = doubleArrayOf(south, west, north, east, zoom)
+        refreshAreaPick()
         val center = LatLng((south + north) / 2, (west + east) / 2)
         // onViewport fires on EVERY camera idle (unlike onCameraIdle, which is gesture-gated and can
         // miss a pan due to a camera-reason race). Keep the "Search this area" center = the live
@@ -6472,11 +6529,11 @@ class MapViewModel @Inject constructor(
             }
             (routeEngine as? app.vela.core.data.ObfRouteEngine)?.shutdown()
             kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
-                app.vela.offline.OfflineMaps.deleteAll(appContext) { if (cont.isActive) cont.resume(Unit) { _, _, _ -> } }
+                app.vela.offline.OfflineMaps.deleteAll(appContext) { if (cont.isActive) cont.resumeWith(Result.success(Unit)) }
             }
             clearMapCache(flash = false)
             kotlinx.coroutines.suspendCancellableCoroutine<Unit> { cont ->
-                app.vela.offline.OfflineMaps.packDatabase(appContext) { if (cont.isActive) cont.resume(Unit) { _, _, _ -> } }
+                app.vela.offline.OfflineMaps.packDatabase(appContext) { if (cont.isActive) cont.resumeWith(Result.success(Unit)) }
             }
             _state.update {
                 it.copy(
@@ -6497,24 +6554,138 @@ class MapViewModel @Inject constructor(
             runCatching {
                 org.maplibre.android.offline.OfflineManager.getInstance(appContext).clearAmbientCache(
                     object : org.maplibre.android.offline.OfflineManager.FileSourceCallback {
-                        override fun onSuccess() { if (cont.isActive) cont.resume(Unit) { _, _, _ -> } }
-                        override fun onError(message: String) { if (cont.isActive) cont.resume(Unit) { _, _, _ -> } }
+                        override fun onSuccess() { if (cont.isActive) cont.resumeWith(Result.success(Unit)) }
+                        override fun onError(message: String) { if (cont.isActive) cont.resumeWith(Result.success(Unit)) }
                     },
                 )
-            }.onFailure { if (cont.isActive) cont.resume(Unit) { _, _, _ -> } }
+            }.onFailure { if (cont.isActive) cont.resumeWith(Result.success(Unit)) }
         }
         kotlinx.coroutines.suspendCancellableCoroutine { cont ->
-            app.vela.offline.OfflineMaps.packDatabase(appContext) { if (cont.isActive) cont.resume(Unit) { _, _, _ -> } }
+            app.vela.offline.OfflineMaps.packDatabase(appContext) { if (cont.isActive) cont.resumeWith(Result.success(Unit)) }
         }
         if (flash) flashStatus(appContext.getString(R.string.settings_map_cache_cleared))
     }
 
-    fun downloadViewport() {
-        val v = viewport ?: run { showStatus(appContext.getString(R.string.mapvm_pan_to_area_first)); return }
-        if (_state.value.areaDownloadPct != null) return // one area at a time
-        val (s, w, n, e, zoom) = listOf(v[0], v[1], v[2], v[3], v[4])
-        val minZ = (zoom - 1).coerceIn(0.0, 15.0)
-        val maxZ = (zoom + 3).coerceIn(minZ, 16.0)
+    /**
+     * The area picker (issue #609, reworked 2026-09-25 to Google's shape): Settings > Offline maps >
+     * "Download an area" drops the user on the map with a frame over it ([MapUiState.areaPicking]);
+     * panning and pinching choose what the frame covers, and the card under it shows [AreaPlan], the
+     * live estimate. The frame's inset fractions are [AREA_FRAME_L]..[AREA_FRAME_B], shared with the
+     * overlay MapScreen draws, so the bounds saved are exactly what the frame shows.
+     *
+     * Two very different parts: the map of the framed area, saved at FULL street detail whatever the
+     * framing zoom (from two levels above it down to the vector tiles' last zoom, 14; a zoomed-out
+     * frame used to save only a few coarse levels), and the region around it (routing, place pack,
+     * places file, the region's map, building outlines), which only comes whole and is a checkbox.
+     * The map part is an estimate: tiles counted per zoom, priced at the region's own density where
+     * Vela has its map archive (its size over its box's tiles, rural tiles being far smaller than
+     * city ones), else [AREA_TILE_KB]. More than [AREA_MAX_TILES] tiles is too large to save as one
+     * area.
+     */
+    data class AreaPlan(
+        val viewMb: Int,
+        val region: app.vela.offline.RoutingRegion?,
+        val regionMb: Int,
+        val regionInstalled: Boolean,
+        val tiles: Int = 0,
+        val tooLarge: Boolean = false,
+        val bounds: DoubleArray = DoubleArray(4), // s, w, n, e
+        val minZ: Double = 0.0,
+    )
+
+    private var areaPickJob: Job? = null
+    private val tileKbByRegion = HashMap<String, Double>()
+
+    fun startAreaPick() {
+        _state.update { it.copy(areaPicking = true, areaPick = null) }
+        refreshAreaPick()
+    }
+
+    fun cancelAreaPick() {
+        areaPickJob?.cancel()
+        _state.update { it.copy(areaPicking = false, areaPick = null) }
+    }
+
+    /** Re-estimate for the frame over the current view (called on every camera idle while picking). */
+    private fun refreshAreaPick() {
+        if (!_state.value.areaPicking) return
+        areaPickJob?.cancel()
+        areaPickJob = viewModelScope.launch { areaDownloadPlan()?.let { p -> _state.update { if (it.areaPicking) it.copy(areaPick = p) else it } } }
+    }
+
+    /** The frame's bounds inside the visible map ([viewport]): longitude is linear across the
+     *  screen, latitude linear in Mercator y. */
+    private fun framedBounds(v: DoubleArray): DoubleArray {
+        val (s, w, n, e) = listOf(v[0], v[1], v[2], v[3])
+        fun my(lat: Double) = Math.log(Math.tan(Math.PI / 4 + Math.toRadians(lat.coerceIn(-85.0511, 85.0511)) / 2))
+        fun lat(y: Double) = Math.toDegrees(2 * Math.atan(Math.exp(y)) - Math.PI / 2)
+        val ys = my(s); val yn = my(n)
+        return doubleArrayOf(
+            lat(ys + (yn - ys) * AREA_FRAME_B), w + (e - w) * AREA_FRAME_L,
+            lat(yn - (yn - ys) * AREA_FRAME_T), e - (e - w) * AREA_FRAME_R,
+        )
+    }
+
+    suspend fun areaDownloadPlan(): AreaPlan? {
+        val v = viewport ?: return null
+        val b = framedBounds(v)
+        val (s, w, n, e) = listOf(b[0], b[1], b[2], b[3])
+        val minZ = (Math.floor(v[4]) - 2).coerceIn(0.0, 14.0)
+        // Street detail at any frame size: every zoom down to the vector tiles' last (14); closer
+        // zooms draw from those, so nothing past 14 is fetched.
+        val tiles = (minZ.toInt()..14).sumOf { z -> tileCount(s, w, n, e, z) }
+        val lat = (s + n) / 2; val lng = (w + e) / 2
+        val kb = areaTileKb(lat, lng)
+        val viewMb = maxOf(1, Math.round(tiles * kb / 1024.0).toInt())
+        val base = AreaPlan(viewMb, null, 0, false, tiles, tiles > AREA_MAX_TILES, b, minZ)
+        val regions = _state.value.routingRegions.ifEmpty {
+            runCatching { regionCatalog.manifest(app.vela.BuildConfig.OBF_MANIFEST_URL) }.getOrDefault(emptyList())
+                .also { rs -> if (rs.isNotEmpty()) _state.update { it.copy(routingRegions = rs) } }
+        }
+        val region = regions.filter { it.covers(lat, lng) }.minByOrNull { it.boxArea() } ?: return base
+        if (region.id in obfStore.installedIds()) return base.copy(region = region, regionInstalled = true)
+        if (_state.value.poiPackRegions.isEmpty()) {
+            val packs = runCatching { poiPackStore.manifest(app.vela.BuildConfig.POI_PACK_MANIFEST_URL) }.getOrDefault(emptyList())
+            _state.update { it.copy(poiPackRegions = packs) }
+        }
+        val pack = _state.value.poiPackRegions.firstOrNull { it.id == region.id }
+        val extras = regionExtrasMb(listOf(region))[region.id] ?: 0
+        val overlayMb = runCatching {
+            overlayStore.manifest(app.vela.BuildConfig.OVERLAY_MANIFEST_URL)
+                .filter { it.covers(lat, lng) }.minByOrNull { it.boxArea() }
+                ?.takeIf { it.id !in overlayStore.installedIds() }?.sizeMb ?: 0
+        }.getOrDefault(0)
+        return base.copy(region = region, regionMb = app.vela.ui.settings.sections.regionInstalledMb(region, pack, extras) + overlayMb)
+    }
+
+    /** KB per saved tile around ([lat],[lng]): the covering map archive's size over the tiles in its
+     *  box (z0-14), within 10-170 KB; [AREA_TILE_KB] where Vela has no archive for the place. */
+    private suspend fun areaTileKb(lat: Double, lng: Double): Double {
+        val archive = runCatching { basemapStore.manifest(app.vela.BuildConfig.BASEMAP_MANIFEST_URL) }.getOrDefault(emptyList())
+            .filter { it.covers(lat, lng) }.minByOrNull { it.area() } ?: return AREA_TILE_KB
+        return tileKbByRegion.getOrPut(archive.id) {
+            val t = (0..14).sumOf { z -> tileCount(archive.s, archive.w, archive.n, archive.e, z).toLong() }
+            if (t <= 0) AREA_TILE_KB else (archive.sizeMb * 1024.0 / t).coerceIn(10.0, 170.0)
+        }
+    }
+
+    /** Web-mercator tiles covering the box at zoom [z]. */
+    private fun tileCount(s: Double, w: Double, n: Double, e: Double, z: Int): Int {
+        val scale = 1 shl z
+        fun x(lng: Double) = ((lng + 180.0) / 360.0 * scale).toInt().coerceIn(0, scale - 1)
+        fun y(lat: Double): Int {
+            val r = Math.toRadians(lat.coerceIn(-85.0511, 85.0511))
+            return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * scale).toInt().coerceIn(0, scale - 1)
+        }
+        return (x(e) - x(w) + 1) * (y(s) - y(n) + 1)
+    }
+
+    /** Save the framed area ([MapUiState.areaPick]), plus the region around it when [withRegion]. */
+    fun downloadPickedArea(withRegion: Boolean) {
+        val plan = _state.value.areaPick ?: return
+        if (plan.tooLarge || _state.value.areaDownloadPct != null) return // one area at a time
+        cancelAreaPick()
+        val (s, w, n, e) = listOf(plan.bounds[0], plan.bounds[1], plan.bounds[2], plan.bounds[3])
         val bounds = org.maplibre.android.geometry.LatLngBounds.from(n, e, s, w)
         // The coordinate name is STORED metadata (it is what tells two saved areas apart in the
         // Settings list) - it is deliberately NOT shown in any banner (user 2026-07-23: the raw
@@ -6526,7 +6697,7 @@ class MapViewModel @Inject constructor(
         // background-download keeper directly for their duration (issue #212).
         app.vela.download.DownloadService.begin(appContext, label)
         app.vela.offline.OfflineMaps.download(
-            appContext, _state.value.styleUri, bounds, minZ, maxZ, name,
+            appContext, _state.value.styleUri, bounds, plan.minZ, 16.0, name,
             onCreated = { areaRegion = it },
             onProgress = { pct -> _state.update { st -> st.copy(areaDownloadPct = pct) } },
         ) { reason ->
@@ -6543,8 +6714,12 @@ class MapViewModel @Inject constructor(
                 ),
             )
         }
-        downloadOfflinePois(s, w, n, e)
-        downloadRoutingForArea((s + n) / 2, (w + e) / 2)
+        // The region part: routing, places, the region's map and building outlines only come
+        // whole, so it is the user's choice on the picker's card, not a silent extra.
+        if (withRegion) {
+            downloadOfflinePois(s, w, n, e)
+            downloadRoutingForArea((s + n) / 2, (w + e) / 2)
+        }
     }
 
     /** Saving an area offline also pulls the routing graph for the region that CONTAINS it (if one is
@@ -6720,15 +6895,22 @@ class MapViewModel @Inject constructor(
         val mountedNow = _state.value.basemapArchive?.removePrefix("pmtiles://file://")?.let { java.io.File(it) }
         val corners = viewport?.let { v -> listOf(LatLng(v[0], v[1]), LatLng(v[0], v[3]), LatLng(v[2], v[1]), LatLng(v[2], v[3])) }.orEmpty()
         // Offline the archive in use is kept while any of the view is still inside it: there is
-        // nothing to stream in its place (issue #552, fourth round).
-        val file = basemapStore.installedFor(center, mountedNow, corners, keepMounted = _state.value.offline)
+        // nothing to stream in its place (issue #552, fourth round). "Offline" here also means a
+        // network that never reached the internet (not VALIDATED): a car head unit joined to a car
+        // Wi-Fi or a phone hotspot with no data reports INTERNET capability, Vela called that
+        // online, dropped the downloaded map for streamed tiles that could not load, and drew gray
+        // with the places on top (user's stereo, 2026-09-26: roads for a moment at start, then
+        // gray, the whole state downloaded).
+        val validated = isValidated()
+        val cantStream = _state.value.offline || !validated
+        val file = basemapStore.installedFor(center, mountedNow, corners, keepMounted = cantStream)
         // A SHALLOW archive (baked a zoom level short because the full bake would pass GitHub's
         // 2 GiB asset limit) draws as a blurred version of the same map once you are past its
         // depth, so a download made the map worse than streaming (issue #552). Online, the streamed
         // tiles win; offline it is still far better than an empty screen.
         val shallow = file != null &&
             (basemapStore.maxZoomOf(file) ?: app.vela.offline.BasemapTileStore.FULL_MAP_ZOOM) < app.vela.offline.BasemapTileStore.FULL_MAP_ZOOM
-        val usable = file?.takeUnless { shallow && !_state.value.offline }
+        val usable = file?.takeUnless { shallow && !cantStream }
         if (shallow) android.util.Log.i("VelaBasemap", "installed basemap is shallow (max zoom < ${app.vela.offline.BasemapTileStore.FULL_MAP_ZOOM}); using it only offline")
         val uri = usable?.let { "pmtiles://file://${it.absolutePath}" }
         if (uri != _state.value.basemapArchive) {
@@ -6742,7 +6924,10 @@ class MapViewModel @Inject constructor(
             if (since < BASEMAP_SWAP_COOLDOWN_MS) kotlinx.coroutines.delay(BASEMAP_SWAP_COOLDOWN_MS - since)
             lastBasemapSwapMs = android.os.SystemClock.elapsedRealtime()
             val fonts = app.vela.offline.GlyphPackStore.installed(appContext)
-            android.util.Log.i("VelaBasemap", "offline basemap for the view: ${uri?.substringAfterLast('/') ?: "none"} (glyph pack installed=$fonts)")
+            val why = "offline basemap for the view: ${uri?.substringAfterLast('/') ?: "none"} " +
+                "(offline=${_state.value.offline} validated=$validated shallow=$shallow glyphs=$fonts)"
+            android.util.Log.i("VelaBasemap", why)
+            diag.record("basemap", why) // so a Diagnostics export says why a map went gray
             _state.update { it.copy(basemapArchive = uri) }
             // An archive without the glyph pack (an interrupted first download) heals itself the
             // next time there is a connection: labels need the pack, and without it the tiles
@@ -7490,28 +7675,32 @@ class MapViewModel @Inject constructor(
     private suspend fun refreshArchive(
         store: app.vela.offline.PmtilesRegionStore,
         region: app.vela.offline.PmtilesRegionStore.Region,
+        step: Int? = null, // 1 = places, 2 = map: shown on the map card and the region's row
     ) {
+        val progress: (Int) -> Unit = { pct -> _state.update { it.copy(regionFileStep = step ?: it.regionFileStep, regionFilePct = pct) } }
         val note: (String) -> Unit = { line ->
             app.vela.ui.RegionUpdates.lastResult.value = line
             diag.record("delta", line)
             android.util.Log.d("VelaDelta", line)
         }
         if (region.delta != null && app.vela.ui.RegionUpdates.allowedNow(appContext)) {
-            if (store.updateWithDelta(region, onProgress = { }, log = note)) { forgetOpenPlaceLinks("${region.id} updated"); return }
+            if (store.updateWithDelta(region, onProgress = progress, log = note)) { forgetOpenPlaceLinks("${region.id} updated"); return }
         } else if (region.delta != null) {
             note("${region.id}: delta available but updates are ${app.vela.ui.RegionUpdates.mode.value.name.lowercase()} on this connection")
         }
         val size = region.sizeMb
         // Over the installed copy, never after deleting it: a failed download keeps the region.
-        val ok = store.download(region, replace = true) { }
+        val ok = store.download(region, replace = true, active = { !regionCancel.get() }, onProgress = progress)
         if (ok) forgetOpenPlaceLinks("${region.id} redownloaded")
         note("${region.id}: full download of ${"%.0f".format(size)} MB ${if (ok) "done" else "FAILED"}")
     }
 
     fun updateRegion(region: app.vela.offline.RoutingRegion) {
-        if (_state.value.poiPackDownloadingId != null || _state.value.routingDownloadingId != null) return
+        if (_state.value.poiPackDownloadingId != null || _state.value.routingDownloadingId != null || _state.value.regionUpdatingId != null) return
         regionCancel.set(false)
+        _state.update { it.copy(regionUpdatingId = region.id, regionDownloadName = region.name, regionFilePct = 0) }
         downloadLaunch(region.name) {
+          try {
             val kinds = _state.value.regionUpdates[region.id].orEmpty()
             val packRegion = _state.value.poiPackRegions.firstOrNull { it.id == region.id }
             if (packRegion != null && region.id in poiPackStore.installedIds() && packRegion.rev > poiPackStore.installedRev(region.id)) {
@@ -7521,7 +7710,7 @@ class MapViewModel @Inject constructor(
             if ("places" in kinds) {
                 placesStore.updatable(placesStore.manifest(app.vela.BuildConfig.PLACES_MANIFEST_URL))
                     .filter { inside(it.s, it.w, it.n, it.e) }
-                    .forEach { if (!regionCancel.get()) refreshArchive(placesStore, it) }
+                    .forEach { if (!regionCancel.get()) refreshArchive(placesStore, it, step = 1) }
                 if (app.vela.ui.MapPoiPrefs.placesWithDownloads.value && !regionCancel.get()) {
                     fetchRegionArchives(region, placesStore, app.vela.BuildConfig.PLACES_MANIFEST_URL, 1)
                 }
@@ -7530,7 +7719,7 @@ class MapViewModel @Inject constructor(
             if ("map" in kinds) {
                 basemapStore.updatable(basemapStore.manifest(app.vela.BuildConfig.BASEMAP_MANIFEST_URL))
                     .filter { inside(it.s, it.w, it.n, it.e) }
-                    .forEach { if (!regionCancel.get()) refreshArchive(basemapStore, it) }
+                    .forEach { if (!regionCancel.get()) refreshArchive(basemapStore, it, step = 2) }
                 if (!regionCancel.get() && fetchRegionArchives(region, basemapStore, app.vela.BuildConfig.BASEMAP_MANIFEST_URL, 2)) {
                     app.vela.offline.GlyphPackStore.ensureInstalled(appContext, http)
                     ensureWorldBasemap()
@@ -7543,8 +7732,10 @@ class MapViewModel @Inject constructor(
                 if (ok) obfStore.writeRev(region.id, region.rev)
                 _state.update { it.copy(routingDownloadingId = null, routingInstalledIds = obfStore.installedIds()) }
             }
-            _state.update { it.copy(regionDownloadName = null, regionFileStep = null) }
+          } finally {
+            _state.update { it.copy(regionDownloadName = null, regionFileStep = null, regionUpdatingId = null) }
             refreshRegionUpdates()
+          }
         }
     }
 
@@ -7682,6 +7873,18 @@ class MapViewModel @Inject constructor(
     }
 
     companion object {
+        /** Average size of one saved map tile, for the area-download estimate ([areaDownloadPlan]):
+         *  OpenFreeMap tiles sampled at 26 to 170 KB, plus the terrain layer that rides along. */
+        const val AREA_TILE_KB = 110.0
+        /** The area picker frame's insets, as fractions of the map (shared with MapScreen's overlay). */
+        const val AREA_FRAME_L = 0.07
+        const val AREA_FRAME_R = 0.07
+        const val AREA_FRAME_T = 0.18
+        const val AREA_FRAME_B = 0.34
+        /** More tiles than this is too large to save as one area: about half of a large US state at
+         *  full detail (~41k tiles), a few hundred MB outside cities (Woodland to Dixon, 509 tiles,
+         *  measured at 5.9 MB against the estimate's 5). */
+        const val AREA_MAX_TILES = 60_000
         /** What a place tap loads before "More photos" / All reviews (2026-09-23, FullPlaceLoad off). */
         const val FIRST_PHOTOS = 6
         const val FIRST_REVIEWS = 10

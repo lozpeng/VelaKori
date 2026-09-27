@@ -158,11 +158,7 @@ Roughly in the order they are worth doing. Each one is small enough for a single
   the region's language when the phone's differs and keep the English copy for the sheet, or
   bake a romanized name into the archive where Overture carries none (it has no alternate names
   in Japan). Needs a device in the region; not chased blind.
-- **Cronet at Chrome's version (2026-09-23).** Google traffic rides Cronet 143 from Maven; Chrome is at
-  154 and the handshake differs by three signature algorithms. `cronet-build.yml` builds Cronet from
-  source at the Android stable tag; it is on main as a manual dispatch and has not been run yet, and
-  its own header expects the first runs to need work (a Chromium checkout is tens of GB against a
-  public runner's disk and 6 h cap). Also open: turn `webProxy` on by default once it has run on
+- **The WebView proxy by default.** Turn `webProxy` on by default once it has run on
   real sessions for a while (a device A/B is running). The proxy's other half, answering Google's
   page telemetry on the phone, already shipped on its own as Settings > Privacy "Block Google's
   page telemetry" (2026-09-25, off by default, works with the proxy on or off).
@@ -181,7 +177,8 @@ Roughly in the order they are worth doing. Each one is small enough for a single
   (a first photo page of 20 or fewer with more to come, or a More reviews tap that loads nothing)
   and Settings > Privacy > Google session says so. The limit is per session, not per IP, so a
   second phone on the same connection can still be the full one. The feed itself stays off
-  (`nativeReviewFeed` 0) until a capture shows it answering more than a new session's five.
+  (`nativeReviewFeed` 0): a full session answers it only with a BotGuard token (`X-maps-bgkey`)
+  that Google's page mints per request, so natively it can never beat a new session's five.
 - **iOS (2026-09-13, not started).** `:core` is plain Kotlin and would move to Kotlin
   Multiplatform with the Android-only bits (SQLite stores, WebView bridges, LocationManager)
   behind expect/actual seams; MapLibre has an iOS SDK, sherpa-onnx ships iOS builds, the hidden
