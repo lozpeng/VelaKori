@@ -45,7 +45,9 @@ object GoogleSatelliteTiles {
             "https://mt$it.google.com/vt/lyrs=$layers&x={x}&y={y}&z={z}"
         }
 }
+object EsriSatellite{
 
+}
 //"https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
 
 object TiandiTuStatellite{

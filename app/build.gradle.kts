@@ -56,7 +56,7 @@ android {
             "String",
             "OBF_MANIFEST_URL",
             "\"${(project.findProperty("obfManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/obf-regions/obf-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/obf-regions/obf-manifest.json"}\"",
         )
         // Open building-footprint overlay (Microsoft, ODbL) PMTiles catalog — same override pattern
         // (-PoverlayManifestUrl=http://127.0.0.1:8099/... for local testing via `adb reverse`).
@@ -64,7 +64,7 @@ android {
             "String",
             "OVERLAY_MANIFEST_URL",
             "\"${(project.findProperty("overlayManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/building-overlays/building-overlay-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/building-overlays/building-overlay-manifest.json"}\"",
         )
         // Posted speed-limit overlay (OSM maxspeed, ODbL) PMTiles catalog — the "Speed B" online source that
         // shows a limit WITHOUT the offline routing graph. Same override pattern (-PmaxspeedManifestUrl=…).
@@ -72,7 +72,7 @@ android {
             "String",
             "MAXSPEED_MANIFEST_URL",
             "\"${(project.findProperty("maxspeedManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/maxspeed-overlays/maxspeed-overlay-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/maxspeed-overlays/maxspeed-overlay-manifest.json"}\"",
         )
         // Open house-number (address-point) overlay (OpenAddresses) PMTiles catalog — same override pattern
         // (-PaddressManifestUrl=…). Rendered as a SymbolLayer of house numbers where OSM lacks addr:housenumber.
@@ -80,7 +80,7 @@ android {
             "String",
             "ADDRESS_MANIFEST_URL",
             "\"${(project.findProperty("addressManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/address-overlays/address-overlay-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/address-overlays/address-overlay-manifest.json"}\"",
         )
         // Open-data PLACES layer (Overture Places baked to PMTiles, tools/build-places-region.sh) catalog,
         // same override pattern (-PplacesManifestUrl=…). Drawn like the Google ambient dots; Google is asked on tap.
@@ -88,7 +88,7 @@ android {
             "String",
             "PLACES_MANIFEST_URL",
             "\"${(project.findProperty("placesManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/places-overlays/places-overlay-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/places-overlays/places-overlay-manifest.json"}\"",
         )
         // Offline BASEMAP tiles (planetiler bakes of the Geofabrik extracts in the OpenMapTiles schema,
         // .github/workflows/basemap-tiles.yml) catalog, same override pattern (-PbasemapManifestUrl=...).
@@ -97,7 +97,7 @@ android {
             "String",
             "BASEMAP_MANIFEST_URL",
             "\"${(project.findProperty("basemapManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/basemap-tiles/basemap-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/basemap-tiles/basemap-manifest.json"}\"",
         )
         // The GLOBAL low-zoom basemap (`world-lowzoom.yml`): the whole planet's coastlines, water,
         // boundaries and place labels at z0-7, about 11 MB, pulled alongside the first offline
@@ -107,7 +107,7 @@ android {
             "String",
             "WORLD_BASEMAP_URL",
             "\"${(project.findProperty("worldBasemapUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/basemap-tiles/basemap-world.pmtiles"}\"",
+                ?: "http://8.152.157.180/vela/basemap-tiles/basemap-world.pmtiles"}\"",
         )
         // Offline PLACE packs (whole-region POI/address SQLite, pulled with a routing-region download so a
         // state is searchable offline) — same override pattern (-PpoiPackManifestUrl=… via `adb reverse`).
@@ -115,7 +115,7 @@ android {
             "String",
             "POI_PACK_MANIFEST_URL",
             "\"${(project.findProperty("poiPackManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/poi-packs/poi-pack-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/poi-packs/poi-pack-manifest.json"}\"",
         )
         // ALPR/Flock surveillance-camera dataset (DeFlock/OSM). A bundled floor ships in assets/, and the
         // app refreshes from this hosted manifest so camera data updates WITHOUT an app release (weekly CI
@@ -124,7 +124,7 @@ android {
             "String",
             "FLOCK_MANIFEST_URL",
             "\"${(project.findProperty("flockManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/flock-cameras/flock-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/flock-cameras/flock-manifest.json"}\"",
         )
         // Per-region road features (lights, stop signs, crossings, humps, speed cameras) baked on CI
         // from Geofabrik extracts and hosted on the `road-features` release; the app downloads the
@@ -134,7 +134,7 @@ android {
             "String",
             "ROAD_FEATURES_MANIFEST_URL",
             "\"${(project.findProperty("roadFeaturesManifestUrl") as String?)
-                ?: "https://github.com/PimpinPumpkin/Vela/releases/download/road-features/road-features-manifest.json"}\"",
+                ?: "http://8.152.157.180/vela/road-features/road-features-manifest.json"}\"",
         )
         // Self-hosted map-font glyphs (Roboto composited over Noto; see ui/map/MapFonts) served
         // from the repo's GitHub Pages — same override pattern (-PmapFontsUrl=http://127.0.0.1:8099
@@ -143,7 +143,7 @@ android {
             "String",
             "MAP_FONTS_URL",
             "\"${(project.findProperty("mapFontsUrl") as String?)
-                ?: "https://pimpinpumpkin.github.io/Vela/fonts"}\"",
+                ?: "http://8.152.157.180/map/glyphs"}\"",//"https://pimpinpumpkin.github.io/Vela/fonts"}\"",
         )
     }
 

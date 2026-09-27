@@ -2950,7 +2950,7 @@ fun VelaMapView(
                     map.gesturesManager.shoveGestureDetector.maxShoveAngle = 55f
                     map.gesturesManager.shoveGestureDetector.pixelDeltaThreshold = 8f
                 }
-                map.setMaxPitchPreference(70.0)
+                map.setMaxPitchPreference(60.0)
                 // Tap a labeled POI on the map to open it. (Named so the D-pad
                 // controller's OK-at-crosshair runs the EXACT same resolution path;
                 // docs/dpad.md.)
