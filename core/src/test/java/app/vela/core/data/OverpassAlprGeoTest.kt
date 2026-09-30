@@ -13,11 +13,11 @@ class OverpassAlprGeoTest {
     // Two shape points ~1.5 km apart on an east-west line near lat 47; a camera sits ON the line
     // roughly halfway between them, which the old vertex-only test (distance to the nearest shape
     // point) missed because both ends are ~700 m away.
-    private val a = LatLng(47.0000, -122.0000)
-    private val b = LatLng(47.0000, -121.9800) // ~1.5 km east
+    private val a = LatLng(37.0000, -122.0000)
+    private val b = LatLng(37.0000, -121.9800) // ~1.5 km east
 
     @Test fun cameraOnLineBetweenSparseVertices_isNear() {
-        val onLineMidway = LatLng(47.00000, -121.9900) // on the segment, ~750 m from either vertex
+        val onLineMidway = LatLng(37.00000, -121.9900) // on the segment, ~750 m from either vertex
         // sanity: it really is far from both vertices, so a vertex-only test would drop it
         assertTrue(OverpassAlprCameras.segDistMeters(onLineMidway, a, a) > 300.0)
         assertTrue(OverpassAlprCameras.segDistMeters(onLineMidway, b, b) > 300.0)
@@ -25,13 +25,13 @@ class OverpassAlprGeoTest {
     }
 
     @Test fun cameraFarFromLine_isNotNear() {
-        val wayOff = LatLng(47.0100, -121.9900) // ~1.1 km north of the line
+        val wayOff = LatLng(37.0100, -121.9900) // ~1.1 km north of the line
         assertFalse(OverpassAlprCameras.nearPolyline(wayOff, listOf(a, b), 120.0))
     }
 
     @Test fun cameraJustOffTheSegment_respectsThreshold() {
         // ~90 m north of the segment midpoint: inside 120 m, outside 50 m.
-        val near = LatLng(47.00081, -121.9900)
+        val near = LatLng(37.00081, -121.9900)
         assertTrue(OverpassAlprCameras.nearPolyline(near, listOf(a, b), 120.0))
         assertFalse(OverpassAlprCameras.nearPolyline(near, listOf(a, b), 50.0))
     }
@@ -40,13 +40,13 @@ class OverpassAlprGeoTest {
         val tiles = OverpassAlprCameras.routeTiles(listOf(a, b), padDeg = 0.003, maxSpanDeg = 0.25, maxTiles = 40)
         assertEquals(1, tiles.size)
         val t = tiles[0] // [s, w, n, e], padded
-        assertTrue(t[0] < 47.0 && t[2] > 47.0)
+        assertTrue(t[0] < 37.0 && t[2] > 37.0)
         assertTrue(t[1] < -122.0 && t[3] > -121.98)
     }
 
     @Test fun longRoute_splitsIntoBoundedTiles() {
         // A ~110 km diagonal run: several points a quarter-degree apart.
-        val line = (0..8).map { LatLng(47.0 + it * 0.12, -122.0 + it * 0.12) }
+        val line = (0..8).map { LatLng(37.0 + it * 0.12, -122.0 + it * 0.12) }
         val tiles = OverpassAlprCameras.routeTiles(line, padDeg = 0.003, maxSpanDeg = 0.25, maxTiles = 40)
         assertTrue("expected more than one tile for a long route", tiles.size > 1)
         assertTrue("tiles capped", tiles.size <= 40)

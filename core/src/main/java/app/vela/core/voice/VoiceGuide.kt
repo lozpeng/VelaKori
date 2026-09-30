@@ -383,6 +383,20 @@ class VoiceGuide @Inject constructor(
         speakNow(text, interrupt)
     }
 
+    /** Get [text] ready to speak ahead of time (the drive's opener, prepared while the route preview
+     *  is up), so the line needs no synthesis when it is spoken. Only the neural voice can keep
+     *  audio; the same voice choice and text changes as [speakNow], so the prepared line matches. */
+    fun prepare(text: String, onDone: () -> Unit = {}) {
+        val t = targetLang()
+        val n = neural
+        // Before the first drive nothing is initialized yet (init runs at Start) and [neural] is
+        // the chosen voice; once a system engine is the active one, there is nothing to prepare.
+        if (muted || n == null || (currentEngine != null && !useNeural) ||
+            !(n.voiceLanguage.let { it == null || it == t } || n.voiceFor(t))
+        ) { onDone(); return }
+        n.prepare(forSpeech(SpokenScript.forVoice(text, n.voiceLanguage ?: t, roadNameLatin)), onDone)
+    }
+
     /** Speak the nav-START opener ("Starting navigation. Head ... on <road>"), but hold it briefly if
      *  its road name is still in a foreign script we have no real romanization for yet (issue #184). A
      *  drive begins before the nav-zoom tiles load, so speaking immediately reads the ICU skeleton
@@ -412,7 +426,9 @@ class VoiceGuide @Inject constructor(
         // Use the neural voice ONLY when it can actually speak the target language. A single-
         // language Piper model reading another language's text is gibberish (the "English voice
         // read Russian" bug) — voiceLanguage==null means unknown → trust it (old behavior).
-        if (useNeural && n != null && n.voiceLanguage.let { it == null || it == t }) {
+        // ...or when another INSTALLED voice speaks it (the phone switched to Russian mid-drive
+        // with Irina installed): the synth swaps the loaded voice, the selection stays.
+        if (useNeural && n != null && (n.voiceLanguage.let { it == null || it == t } || n.voiceFor(t))) {
             // The neural synth fires onDone exactly ONCE per speak() (including aborted/
             // interrupted utterances — PiperSynth's finally), so the refcount balances without
             // any interrupt special-casing. Do NOT reset the count here: the interrupted

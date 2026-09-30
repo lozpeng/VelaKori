@@ -110,6 +110,14 @@ BACK_ON_COURSE_HITS         = 2        // on-route fixes that discard a reroute 
   Google's traffic and otherwise goes without it. When the open router gives nothing,
   `RerouteFallback.pick` takes Google's route if it is already back, else races Google against the
   downloaded region's engine for whatever time is left and takes the first answer.
+- **The phone goes first when it can (2026-09-28).** If a downloaded region covers both ends of the
+  trip, an urgent reroute starts the on-device route at the same time as the open router and adopts
+  it when the open router has not answered within `PHONE_FIRST_ONLINE_WAIT_MS = 2_500` (the compute
+  itself gets `PHONE_FIRST_ONDEVICE_WAIT_MS = 4_000` past that, never past the deadline). That
+  route has real turns but no traffic, so the degraded recheck (20 s) replaces it with the online
+  route on the same course, or offers a different online course as a faster route. A trip with
+  stops chains its legs on the phone the same way. Before this the on-device engine was only asked
+  after the open router had given nothing, so a hung router cost the whole deadline first.
 - **It keeps pointing where you are going.** The reroute sends your heading with the start point,
   so the answer is "given that you are going this way, what now" rather than "turn around".
   Planning a route sends none: which way a parked car faces is not a routing constraint.
@@ -220,7 +228,15 @@ A stop counts as passed when progress along the route comes within `STOP_ARRIVE_
 it, and the voice says "You've reached <stop>". Every reroute and recheck routes through the stops
 still ahead, never straight to the destination. A reroute that could not include them is adopted
 anyway (being guided beats being lost), says so, and keeps them in the plan for the next attempt;
-a faster-route offer that skips one is never made.
+a faster-route offer that skips one is never made. A stop the route does not pass near has no
+mark, and counts as passed only once a later stop is reached (`NavEngine.stopsPassed`), so the
+moments right after a stops edit, before the new route lands, keep every stop. Progress that
+jumps more than 250 m past the next stop in one fix is a skip, not an arrival (a driver who kept
+going after an edit, on the road the route uses later): nothing is announced, and the drive
+reroutes back through the stop.
+
+**Adding a stop mid-drive.** The stops editor's Add stop opens the search along the route (the
+same panel as the magnifier button), and a pick from its results becomes a stop on the drive.
 
 **Removing the next stop.** The step list carries an "Edit route" row on every drive, and with
 stops ahead it has a "Remove next" button. It asks first ("Remove <stop> from this drive?"), then
@@ -306,7 +322,9 @@ from behind the wheel.
 
 On the map it sits in the bottom bar, in the slot to the right of the trip figures ("Pause button
 on the navigation bar", on by default). That slot is otherwise empty, there only to balance the
-End button on the left, and putting pause there leaves mute as a plain button with the other map
+End button on the left (which asks "End navigation?" first when Settings > Navigation > "Ask
+before ending navigation" is on, `NavEndConfirm`, off by default, issue #624; Back during a drive
+goes through the same question), and putting pause there leaves mute as a plain button with the other map
 controls, so neither is behind a pop-out.
 
 Anyone who has asked for buttons over gestures gets the step list button in the bar as well, and
@@ -447,3 +465,16 @@ or if the system declines, the notification is exactly what it was before.
   device.
 - **Speed limits are only as good as OpenStreetMap.** Many roads carry no `maxspeed` tag, and
   there the badge is blank, which is the data rather than the lookup.
+
+## Testing navigation without driving
+
+Two switches in Settings > Diagnostics make every nav screen testable at a desk, anywhere:
+
+- **Simulate my location** pins the location dot to the map center at the moment it is turned on.
+  Directions start from there, recenter goes there, and no real GPS is read. Center the map on a
+  fixture area (Davis) first.
+- **Simulate driving** (`demo_drive`) makes Start drive the planned route along a synthetic trace,
+  one fix a second, through the same replay path a recorded trip uses. End stops it.
+
+Together they show the whole drive: the icon, north-up, the turn card, voice and every chrome
+state. Turn both off before a real drive; while they are on, Start never reads GPS.

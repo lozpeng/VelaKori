@@ -66,7 +66,10 @@ A catalog row is **one download under one progress card** (`MapViewModel.downloa
 each piece starting when the one before it finishes:
 
 1. the routing `.obf` ("Downloading <region> routing");
-2. then the place pack with the same region id ("Saving <region> places for offline search");
+2. then the place pack ("Saving <region> places for offline search"): the region's own, or for a
+   piece of a split country or state its parent's (Northern California gets California's, which
+   then serves Southern California too). A parent pack over 600 MB zipped (Germany's is 1.9 GB) is
+   left for "Get places", which says whose pack it is and how big before it downloads;
 3. then the places archives, if **Include places with downloads** is on (it is by default):
    step 1 of `fetchRegionArchives`, "Saving <region> places for the map";
 4. then the basemap archives, step 2, "Downloading the <region> map", and once those are in, the
@@ -174,9 +177,12 @@ works offline are these.
   endpoints must fall inside the installed files, or there is no offline route at all.
 - **Avoids work.** Avoid tolls, highways and ferries are applied from the road attributes at
   calculation time, and walking and cycling come from the same file.
-- **Long routes fail.** Past `MEMORY_MB = 256` the router throws rather than slowing down, and on a
-  dense network that happens somewhere between 60 and 150 km (the measurements are in chapter 5).
-  The budget cannot be raised on a phone.
+- **Long routes use the highway hierarchy.** Region files baked since 2026-09-29 carry OsmAnd's
+  precomputed car and bicycle shortcuts, and a 250 km drive across a dense region routes in under
+  a second, avoiding highways or tolls too; long bike rides too once the region is rebaked with
+  the bicycle set. Without them (an older download, a trip across two files, walking) the plain search
+  runs, and past `MEMORY_MB = 256` it throws rather than slowing down, somewhere between 60 and
+  150 km on a dense network (chapter 5 has both sets of numbers). Update the region to get HH.
 - **One route, no alternates, no traffic.** The arrival time is free-flow.
 
 The same file answers the **posted speed limit** under the puck while driving, so the badge keeps
@@ -392,8 +398,8 @@ to switch itself on before someone had watched it work. That happened on 2026-09
 Pixel 9 took a published patch end to end, and the same run found and fixed two bugs (the catalog
 cached for the life of the process, so no update was ever offered, and dead bytes never bounded).
 The default became On Wi-Fi on 2026-09-25; anyone who had picked Never keeps it. On either
-Wi-Fi setting the app checks a minute after start, at
-most once in 20 hours, and applies every published patch that fits an installed places or
+Wi-Fi setting the app checks a minute after start, every 3 hours and when a working network
+appears, at most once in 20 hours, and applies every published patch that fits an installed places or
 basemap archive or place pack, on its own and quietly; it never downloads a region whole by
 itself, and it skips a drive in progress.
 
@@ -411,6 +417,54 @@ to `files/catalog-<hash>.json` (the hash is of the manifest URL). When the fetch
 reads that copy instead. Before 2026-09-23 a failed fetch meant an empty list, so a user who had
 just downloaded a state and opened the page with no signal read it as "nothing is downloaded". A
 phone that has never fetched the catalog still gets an empty page offline.
+
+### Grid cells: part of a region
+
+A region can also be cut into cells, so a frame over one town can pull a few small bundles instead
+of the whole state. The bake is `scripts/build-cells-region.sh` and the workflow `grid-cells.yml`
+(SPEC 7.6). Cells are 0.5 degree tiles of one global grid, clipped to the region (a region too
+large for one release, Alaska, gets coarser tiles); each is one zip
+holding its routing obf, its place pack and its slice of the region's places tiles.
+
+Since 2026-09-28 the area picker reads them. Where the region under the frame has cells baked and
+is not installed whole, the picker's card offers "offline directions and places for just this
+area" with the size and the number of pieces, above the whole-region checkbox; picking one clears
+the other, and the pieces are the default. The pieces download one after another under the same
+card a region download uses ("Delaware, part 2 of 3"), and each one's obf, place pack and places
+slice land in the same folders a whole region fills, so directions, offline search and the places
+layer use them with nothing else to set up. Cancel keeps the pieces already down. Offline maps >
+Downloaded lists them as one row per region ("Part of the region: 3 pieces, 24 MB") with a
+delete; deleting the whole region removes its pieces too.
+
+The places layer draws every installed piece the screen touches (up to eight, nearest first), so
+two neighboring pieces read as one map; a whole region installed beside its pieces is drawn alone,
+and downloading the whole region afterwards removes its pieces, so a search never lists a place
+from both. Pieces update like regions: a newer bake shows on the row ("2 pieces have a newer
+version") with an Update button, and the automatic updates setting pulls them on its own.
+
+Delaware, baked on a laptop with four cells at a time:
+
+| | Cells | Whole region |
+| --- | --- | --- |
+| Tiles touching the box / kept | 15 / 10 | |
+| Routing obf | 7.72 MB | 7.63 MB |
+| Place pack (db / zipped) | 23.8 / 10.4 MB | 23.2 / 10.4 MB |
+| Places tiles | 19.5 MB | 57.5 MB |
+| Download | 37.7 MB | 75.6 MB |
+| Largest / smallest cell | 13.7 / 0.01 MB | |
+| Bake time | 30 s (6 s split, 0 to 17 s per cell) | obf 26 s + pack 5 s |
+
+The routing and pack totals run 1 to 3% over the region's, because a road crossing a cell edge
+is kept whole in both cells. The places column is not like for like: the region's places archive
+is cut by its box, which takes in neighboring states' cities, while each cell's slice keeps only
+the tiles inside the region's boundary. Four trips across cell edges route over the cell files
+exactly as over the region file (same distance, time and steps; `ObfCellsProbeTest`).
+
+Northern California (`california-norcal`), six cells at a time: 308 tiles, 151 kept, 549 MB zipped
+(obf 136, pack 182, places 232) and 793 MB installed, in 7 min 20 s (split 160 s at 10 cells per pass; the default is now 4, see SPEC 7.6 for osmium's
+memory). Cells run from
+2 KB to 93 MB; the largest is the dense corner of the bay, whose obf alone took 118 s. The places
+slices add to 232 MB against the region archive's 247 MB.
 
 ## Limits
 

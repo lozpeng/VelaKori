@@ -54,6 +54,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.RadioButtonChecked
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.NorthWest
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
@@ -574,6 +576,21 @@ fun MapScreen(
     // In-nav search-along-route: the map search FAB arms a panel (text field + chips) above
     // the bar. Reset when nav ends so a stale-open panel can't greet the next drive.
     var navSearchOpen by remember { mutableStateOf(false) }
+    // Ending a drive: straight away, or after a confirm when Settings > Navigation asks for one
+    // (NavEndConfirm, off by default, issue #624). The red X and Back during a drive both come here.
+    var confirmEndNav by remember { mutableStateOf(false) }
+    val requestEndNav: () -> Unit = { if (app.vela.ui.NavEndConfirm.on.value) confirmEndNav = true else vm.stopNav() }
+    if (confirmEndNav && state.navigating) {
+        app.vela.ui.VelaDialog(
+            onDismissRequest = { confirmEndNav = false },
+            title = stringResource(R.string.nav_end_confirm_title),
+            confirmText = stringResource(R.string.nav_end_confirm_end),
+            onConfirm = { confirmEndNav = false; vm.stopNav() },
+            dismissText = stringResource(R.string.nav_end_confirm_keep),
+            onDismiss = { confirmEndNav = false },
+            text = { Text(stringResource(R.string.nav_end_confirm_body)) },
+        )
+    }
     var navSearchQuery by remember { mutableStateOf("") }
     LaunchedEffect(state.navigating) {
         if (!state.navigating) { navSearchOpen = false; navSearchQuery = "" }
@@ -636,7 +653,7 @@ fun MapScreen(
             // whole drive - ending nav because you browsed gas stations would be brutal.
             state.navigating && state.results.isNotEmpty() -> vm.clearSearch()
             state.navigating && navSearchOpen -> { navSearchOpen = false; focusManager.clearFocus() }
-            state.navigating -> vm.stopNav()
+            state.navigating -> requestEndNav()
             state.directionsOpen || state.activeRoute != null || state.routes.isNotEmpty() ||
                 state.transit.isNotEmpty() || state.transitLoading -> vm.clearRoute()
             state.selected != null -> vm.clearSelection()
@@ -994,7 +1011,10 @@ fun MapScreen(
     // skip the permission prompts that the picker's Start button honors. Consumed once, so a
     // later refetch (mode change, added stop) cannot silently launch a drive.
     LaunchedEffect(state.activeRoute, state.navigating) {
-        if (state.activeRoute != null && !state.navigating && vm.consumeAutoStart()) onStartNav()
+        // The route's follow-up work (road features along it, the camera count and detours) runs
+        // on the CPU right after the route lands; starting the fly-in on top of it dropped the map
+        // to 5-7 fps on a 4a. From the chooser it has long finished by the time Start is tapped.
+        if (state.activeRoute != null && !state.navigating && vm.consumeAutoStart()) { vm.awaitRouteWork(); onStartNav() }
     }
     if (showPreciseNeeded) {
         app.vela.ui.VelaDialog(
@@ -1076,6 +1096,7 @@ fun MapScreen(
             navBarTopPx = navBarTopPx,
             navOverviewTick = navOverviewTick,
             navRecenterTick = navRecenterTick,
+            onNavRecenter = { vm.recenterNav(); navRecenterTick++ },
             screenHeightPx = screenHeightPx,
             svPose = svPose,
             metersPerPixelState = metersPerPixelState,
@@ -1667,7 +1688,7 @@ fun MapScreen(
         val movingFree = !state.navigating && (state.mySpeed ?: 0f) > 3f &&
             !searchOpen && state.selected == null && !state.directionsOpen && !state.showSteps && !resultsShown
         val postedLimitKmh = state.speedLimitKmh ?: state.speedLimitOverlayKmh
-        if (((state.navigating && !state.showSteps && !state.editingStops) && state.mySpeed != null) || movingFree) {
+        if (app.vela.ui.SpeedDisplay.on.value && (((state.navigating && !state.showSteps && !state.editingStops) && state.mySpeed != null) || movingFree)) {
             SpeedWidget(
                 speedMps = state.mySpeed,
                 limitKmh = postedLimitKmh,
@@ -1742,15 +1763,16 @@ fun MapScreen(
             )
 
             // Mid-drive stops editor (issue #402): the chooser's editor over the ETA bar's slot,
-            // origin = where you are, rows = the stops still ahead; Done replans once. Hidden while
-            // the editor's own Add stop runs the search page.
+            // origin = where you are, rows = the stops still ahead; Done replans once. Its Add stop
+            // applies the edits and opens the along-route search (issue #623): the search page is
+            // not drawn during a drive, so the planning pick left the editor hidden and stuck.
             state.navigating && state.editingStops && !searchOpen -> app.vela.ui.place.StopsEditorSheet(
                 originName = stringResource(R.string.mapscreen_your_location),
                 originIsMe = true,
                 destinationName = state.arrivedLabel.ifBlank { stringResource(R.string.mapscreen_destination) },
                 stops = vm.navStopsForEditor(),
                 onApply = vm::applyStops,
-                onAddStop = vm::beginPickStop,
+                onAddStop = { vm.closeStopsEditor(); navSearchOpen = true },
                 onDismiss = vm::closeStopsEditor,
                 modifier = Modifier
                     .align(if (landscapeChrome) Alignment.BottomStart else Alignment.BottomCenter)
@@ -1773,7 +1795,7 @@ fun MapScreen(
                         remainingSeconds = state.nav.remainingDuration,
                         offRoute = state.nav.offRoute,
                         paused = state.navPaused,
-                        onStop = vm::stopNav,
+                        onStop = requestEndNav,
                         onSteps = close,
                         trafficRatio = state.activeRoute?.trafficRatio,
                         showListButton = false,
@@ -1879,7 +1901,7 @@ fun MapScreen(
                     remainingSeconds = state.nav.remainingDuration,
                     offRoute = state.nav.offRoute && !state.navPaused,
                     paused = state.navPaused,
-                    onStop = vm::stopNav,
+                    onStop = requestEndNav,
                     onSteps = {
                         // From the button / chevron: the well opens from closed.
                         stepsEnterFromPx = 0f
@@ -1956,6 +1978,7 @@ fun MapScreen(
                         app.vela.ui.formatDuration(r.durationInTrafficSeconds ?: r.durationSeconds), app.vela.ui.formatDistance(r.distanceMeters))
                 }
                 app.vela.ui.place.GoogleStyleDirectionsPanel(
+                    onShowTraffic = if (app.vela.ui.RouteTrafficOnTap.on.value && !state.routeTrafficRequested && !app.vela.ui.GoogleFree.on.value && state.travelMode != app.vela.core.model.TravelMode.WALK) vm::requestRouteTraffic else null,
                     currentMode = state.travelMode,
                     routes = state.routes,
                     activeRoute = state.activeRoute,
@@ -2026,35 +2049,14 @@ fun MapScreen(
                 )
             }
 
-            state.directionsOpen && !searchOpen && state.pickOnMap == null -> DirectionsPanel(
-                destinationName = if (state.directionsReversed) (state.directionsOrigin?.name ?: stringResource(R.string.mapscreen_your_location))
-                else (state.selected?.name ?: stringResource(R.string.mapscreen_destination)),
-                currentMode = state.travelMode,
-                routes = state.routes,
-                activeRoute = state.activeRoute,
-                flockOnRoute = state.flockOnRoute,
-                transit = state.transit,
-                transitLoading = state.transitLoading,
-                modeEtas = state.modeEtas,
-                onModeSelected = vm::setTravelMode,
-                avoidTolls = state.avoidTolls,
-                avoidHighways = state.avoidHighways,
-                avoidFerries = state.avoidFerries,
-                onAvoidTolls = vm::setAvoidTolls,
-                onAvoidHighways = vm::setAvoidHighways,
-                onAvoidFerries = vm::setAvoidFerries,
-                onSelectRoute = vm::selectRoute,
+            // The classic panel (and the transit tab under the Google-style picker) lives in its own
+            // composable: MapScreen is at ART's verifier limit, and this call was ~30 arguments.
+            state.directionsOpen && !searchOpen && state.pickOnMap == null -> ClassicDirectionsHost(
+                state = state,
+                vm = vm,
                 onStartNav = onStartNav,
-                minimizeTick = dirPanTick,
-                onSteps = if (state.activeRoute != null) vm::openSteps else null,
-                onSearchAlongRoute = vm::searchAlongRoute,
-                onWalkDirections = vm::walkDirections,
-                onStartTransit = vm::startTransitNav,
-                onTransitPreview = vm::onTransitRowExpanded,
-                onTimeSelected = vm::setDirectionsTime,
-                transitPrefer = state.transitPrefer,
-                onTransitPrefer = vm::setTransitPrefer,
-                onCollapsedChange = { dirMinimized = it },
+                dirPanTick = dirPanTick,
+                onMinimized = { dirMinimized = it },
                 // Portrait: the body may open only as far as the endpoints card leaves over a
                 // minimum strip of map (issue #400, 240x320 phones); the chooser's own header
                 // (handle + mode chips) is allowed for above the body. Floored so the list is
@@ -2063,14 +2065,9 @@ fun MapScreen(
                     (screenHeightPx.toDp().value - topCardBottomPx.toDp().value - CHOOSER_MAP_STRIP_DP - CHOOSER_HEADER_DP)
                         .coerceAtLeast(CHOOSER_BODY_MIN_DP)
                 },
-                // Landscape: a LEFT side panel, width-capped, exactly like the place and results
-                // sheets beside it (issue #297). As a full-width bottom sheet its open height ate
-                // a landscape screen whole - the map was not merely obscured, it was completely
-                // gone, which is a poor way to ask someone to choose between routes drawn on it.
-                modifier = Modifier
-                    .align(if (landscapeChrome) Alignment.BottomStart else Alignment.BottomCenter)
-                    .onGloballyPositioned { dirPanelTopRaw = it.boundsInWindow().top.roundToInt() }
-                    .landscapeColumn(landscapeChrome, sidePanelWidthDp),
+                landscapeChrome = landscapeChrome,
+                sidePanelWidthDp = sidePanelWidthDp,
+                onTopPx = { dirPanelTopRaw = it },
             )
 
             // The place sheet yields while Street View is up - the pano takes the top half and the
@@ -2092,6 +2089,8 @@ fun MapScreen(
                 photosLoading = state.photosLoading,
                 morePhotos = state.morePhotosFor != null && state.morePhotosFor == state.selected?.featureId,
                 onMorePhotos = vm::loadAllPhotos,
+                onShowPhotos = if (state.photosAwaitingTapFor != null && state.photosAwaitingTapFor == state.selected?.featureId) vm::loadPhotosNow else null,
+                onPhotoCategories = if (state.selected?.photoCategories?.any { it != null } == true || state.photoWalkedFor == state.selected?.featureId) null else vm::loadPhotoCategories,
                 detailsLoading = state.loadingDetails,
                 placesHere = state.placesHere,
                 // Ownership-gated: a board renders ONLY on the place it was fetched for. Writers
@@ -2113,6 +2112,7 @@ fun MapScreen(
                 onSetShortcut = vm::setSelectedAsShortcut,
                 onRetryReviews = vm::retryReviews,
                 onNeedReviews = vm::ensureReviews,
+                onShowReviews = if (state.reviewsAwaitingTapFor != null && state.reviewsAwaitingTapFor == state.selected?.id) vm::loadReviewsNow else null,
                 onClearParking = {
                     vm.clearParkingSpot()
                     vm.clearSelection()
@@ -2382,71 +2382,74 @@ fun MapScreen(
             val parkingSet = state.parkingSpot != null
             var showParkingHistory by remember { mutableStateOf(false) }
             var showParkingMenu by remember { mutableStateOf(false) }
-            Surface(
-                shape = RoundedCornerShape(12.dp),
-                color = if (parkingSet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
-                // Soft glyph ink when unset (onSecondaryContainer read near-black, same as the
-                // bookmark ribbon; user 2026-07-11). The SET state keeps primary/onPrimary - it
-                // carries state, like the Home/Work rows.
-                contentColor = if (parkingSet) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
-                shadowElevation = 6.dp,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .navigationBarsPadding()
-                    .padding(end = 24.dp, bottom = chromeLift + 92.dp)
-                    .dpadHighlight(RoundedCornerShape(12.dp)),
-            ) {
-                Box(
-                    Modifier
-                        .size(40.dp)
-                        .pointerInput(parkingSet, state.parkingHistory.size) {
-                            detectTapGestures(
-                                onTap = {
-                                    if (parkingSet) {
-                                        showParkingMenu = true
-                                    } else {
-                                        val msg = if (vm.saveParkingSpot()) parkingSavedMsg else parkingNoFixMsg
-                                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-                                    }
-                                },
-                                onLongPress = {
-                                    if (state.parkingHistory.isNotEmpty()) showParkingHistory = true
-                                },
-                            )
-                        },
-                    contentAlignment = Alignment.Center,
+            // Settings > Map can hide it (issue #626); a saved spot keeps it, the way back to the car.
+            if (app.vela.ui.ParkingButton.on.value || parkingSet) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (parkingSet) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondaryContainer,
+                    // Soft glyph ink when unset (onSecondaryContainer read near-black, same as the
+                    // bookmark ribbon; user 2026-07-11). The SET state keeps primary/onPrimary - it
+                    // carries state, like the Home/Work rows.
+                    contentColor = if (parkingSet) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    shadowElevation = 6.dp,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .navigationBarsPadding()
+                        .padding(end = 24.dp, bottom = chromeLift + 92.dp)
+                        .dpadHighlight(RoundedCornerShape(12.dp)),
                 ) {
-                    Icon(
-                        Icons.Default.LocalParking,
-                        contentDescription = stringResource(
-                            if (parkingSet) R.string.map_parked_car else R.string.map_parking_save,
-                        ),
-                    )
-                    // The parking hub, anchored to the button. Only reachable when a spot is set.
-                    // VelaMenu, not a bare DropdownMenu - the D-pad rule (docs/dpad.md): a popup
-                    // can't be pre-focused, so key-first devices get the auto-focusing chooser.
-                    app.vela.ui.VelaMenu(expanded = showParkingMenu, onDismissRequest = { showParkingMenu = false }) {
-                        item(stringResource(R.string.map_parking_find), Icons.Default.DirectionsCar) {
-                            showParkingMenu = false; vm.showParkedCar(parkedCarLabel)
-                        }
-                        // "Move parking here" overwrites the current spot with your live fix; the old
-                        // one is not lost - saveParkingSpot archives it to history. Hidden with no fix.
-                        if (state.myLocation != null) {
-                            item(stringResource(R.string.map_parking_move_here), Icons.Default.MyLocation) {
+                    Box(
+                        Modifier
+                            .size(40.dp)
+                            .pointerInput(parkingSet, state.parkingHistory.size) {
+                                detectTapGestures(
+                                    onTap = {
+                                        if (parkingSet) {
+                                            showParkingMenu = true
+                                        } else {
+                                            val msg = if (vm.saveParkingSpot()) parkingSavedMsg else parkingNoFixMsg
+                                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    onLongPress = {
+                                        if (state.parkingHistory.isNotEmpty()) showParkingHistory = true
+                                    },
+                                )
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            Icons.Default.LocalParking,
+                            contentDescription = stringResource(
+                                if (parkingSet) R.string.map_parked_car else R.string.map_parking_save,
+                            ),
+                        )
+                        // The parking hub, anchored to the button. Only reachable when a spot is set.
+                        // VelaMenu, not a bare DropdownMenu - the D-pad rule (docs/dpad.md): a popup
+                        // can't be pre-focused, so key-first devices get the auto-focusing chooser.
+                        app.vela.ui.VelaMenu(expanded = showParkingMenu, onDismissRequest = { showParkingMenu = false }) {
+                            item(stringResource(R.string.map_parking_find), Icons.Default.DirectionsCar) {
+                                showParkingMenu = false; vm.showParkedCar(parkedCarLabel)
+                            }
+                            // "Move parking here" overwrites the current spot with your live fix; the old
+                            // one is not lost - saveParkingSpot archives it to history. Hidden with no fix.
+                            if (state.myLocation != null) {
+                                item(stringResource(R.string.map_parking_move_here), Icons.Default.MyLocation) {
+                                    showParkingMenu = false
+                                    val msg = if (vm.saveParkingSpot()) parkingMovedMsg else parkingNoFixMsg
+                                    Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                            if (state.parkingHistory.size > 1) {
+                                item(stringResource(R.string.map_parking_earlier), Icons.Default.History) {
+                                    showParkingMenu = false; showParkingHistory = true
+                                }
+                            }
+                            item(stringResource(R.string.map_parking_clear), Icons.Default.Delete) {
                                 showParkingMenu = false
-                                val msg = if (vm.saveParkingSpot()) parkingMovedMsg else parkingNoFixMsg
-                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                                vm.clearParkingSpot()
+                                Toast.makeText(context, parkingClearedMsg, Toast.LENGTH_SHORT).show()
                             }
-                        }
-                        if (state.parkingHistory.size > 1) {
-                            item(stringResource(R.string.map_parking_earlier), Icons.Default.History) {
-                                showParkingMenu = false; showParkingHistory = true
-                            }
-                        }
-                        item(stringResource(R.string.map_parking_clear), Icons.Default.Delete) {
-                            showParkingMenu = false
-                            vm.clearParkingSpot()
-                            Toast.makeText(context, parkingClearedMsg, Toast.LENGTH_SHORT).show()
                         }
                     }
                 }
@@ -2550,7 +2553,6 @@ fun MapScreen(
             if (!(driveFollowing && speedOverlayArmed) && !movingFree && !sidePanelUp) {
                 ScaleBarReader(
                     state = metersPerPixelState,
-                    dark = darkTheme,
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .navigationBarsPadding()
@@ -2679,6 +2681,24 @@ fun MapScreen(
                         toggleItem(stringResource(R.string.settings_topography), app.vela.ui.Topography.on.value) {
                             app.vela.ui.Topography.set(ctx, it)
                         }
+                        // Where the map's places come from, and the Google-free switch, one tap from
+                        // the map (issue #626): the same holders Settings > Places and Privacy flip.
+                        // The places choice only changes the map's pins; search still asks Google
+                        // unless Google-free is on, which is why that switch sits here too.
+                        listOf(
+                            app.vela.ui.MapPoiPrefs.SOURCE_OPEN to R.string.settings_places_source_open,
+                            app.vela.ui.MapPoiPrefs.SOURCE_GOOGLE to R.string.settings_places_source_google,
+                            app.vela.ui.MapPoiPrefs.SOURCE_BOTH to R.string.settings_places_source_both,
+                        ).forEach { (id, label) ->
+                            val picked = app.vela.ui.MapPoiPrefs.placesSource.value == id
+                            item(
+                                stringResource(R.string.map_layers_places, stringResource(label)),
+                                if (picked) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                            ) { app.vela.ui.MapPoiPrefs.setPlacesSource(ctx, id) }
+                        }
+                        toggleItem(stringResource(R.string.settings_google_free), app.vela.ui.GoogleFree.on.value) {
+                            app.vela.ui.GoogleFree.set(ctx, it)
+                        }
                     }
                 }
             }
@@ -2707,9 +2727,14 @@ fun MapScreen(
         val downloadingVoiceId = state.voiceDownloadingId
         val downloadingRegion = state.routingDownloadingId != null || state.poiPackDownloadingId != null || state.regionFileStep != null
         val bareMap = gates.bareMap
+        // Download progress shows over a place sheet or the route chooser too (2026-09-28: an area
+        // pick started from a dropped pin ran its whole pull with no card); only the search page
+        // keeps every card off. Notices and the update offer stay bare-map only.
+        val downloadsOk = !searchOpen
         val fasterOffer = state.navigating && state.fasterRoute != null
         if (state.status != null || fasterOffer ||
-            (bareMap && (state.notices.isNotEmpty() || downloadingVoiceId != null || downloadingRegion || state.updateInfo != null))
+            (bareMap && (state.notices.isNotEmpty() || state.updateInfo != null)) ||
+            (downloadsOk && (downloadingVoiceId != null || state.asrDownloadPct != null || downloadingRegion || state.areaDownloadPct != null))
         ) {
             val bannerBottom = with(LocalDensity.current) { navBannerBottomPx.toDp() }
             Column(
@@ -2745,6 +2770,7 @@ fun MapScreen(
                     )
                 }
                 state.status?.let { msg ->
+                    val voiceDl = state.statusVoiceDownloadId
                     InfoCard(
                         title = stringResource(R.string.mapscreen_heads_up),
                         body = msg,
@@ -2753,12 +2779,19 @@ fun MapScreen(
                         // A voice problem carries its fix. Normally a pill straight to Vela's voice
                         // library; for a language with no Vela voice (Japanese) it opens the phone's
                         // own voice settings instead, where the user can add a system voice.
+                        autoMs = state.statusAutoMs,
                         pillLabel = when {
                             state.statusOpensTtsSettings -> stringResource(R.string.mapscreen_system_voices)
+                            voiceDl != null -> app.vela.core.voice.PiperCatalog.byId(voiceDl)
+                                ?.let { v -> stringResource(R.string.mapscreen_download_voice, v.displayName, v.sizeMb) }
+                                ?: stringResource(R.string.mapscreen_get_voice)
                             state.statusVoiceAction -> stringResource(R.string.mapscreen_get_voice)
                             else -> null
                         },
                         onPill = when {
+                            voiceDl != null -> {
+                                { vm.clearStatus(); vm.downloadVoice(voiceDl) }
+                            }
                             state.statusOpensTtsSettings -> {
                                 {
                                     vm.clearStatus()
@@ -2784,7 +2817,7 @@ fun MapScreen(
                         },
                     )
                 }
-                if (bareMap) {
+                if (downloadsOk) {
                     if (downloadingVoiceId != null) {
                         VoiceDownloadCard(installing = state.voiceInstalling, pct = state.voiceDownloadPct ?: 0f, onCancel = { vm.cancelVoiceDownload() })
                     }
@@ -2814,6 +2847,8 @@ fun MapScreen(
                     state.areaDownloadPct?.let { pct ->
                         RegionDownloadCard(name = "", places = false, pct = pct, area = true, onCancel = { vm.cancelAreaDownload() })
                     }
+                }
+                if (bareMap) {
                     // A newer release on GitHub (self-updater; the check is a Settings toggle).
                     state.updateInfo?.let { u ->
                         UpdateCard(
@@ -2835,75 +2870,7 @@ fun MapScreen(
         if (state.areaPicking && !pipUi) {
             AreaPickOverlay(state, vm, zoomButtons = dpadMode || app.vela.ui.PreferButtons.on.value) { mapDpad.zoomBy(it) }
         }
-        if (pipUi && state.navigating && state.maneuverText.isNotEmpty()) {
-            // The one PiP overlay, Google's shape: the turn card's own green with the glyph, the
-            // distance as the headline and the turn text under it, across the top of the window.
-            // The old dark strip put everything on one small line and read as a caption
-            // (user 2026-09-13: hard to parse next to Google's).
-            val next = state.activeRoute?.maneuvers?.getOrNull(state.nav.stepIndex)
-            androidx.compose.material3.Surface(
-                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(4.dp),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            ) {
-                Row(
-                    Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (next != null) {
-                        Icon(
-                            app.vela.ui.nav.maneuverIconFor(next),
-                            contentDescription = null,
-                            modifier = Modifier.size(30.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Column {
-                        Text(
-                            formatDistance(state.nav.distanceToNextManeuver),
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                        )
-                        // The road the turn enters, not the whole sentence: "Turn left o..." said
-                        // nothing at the mini map's width; "County Rte E8" does.
-                        val roadOnly = next?.let { m -> m.ref?.takeIf { it.isNotBlank() } ?: m.road?.takeIf { it.isNotBlank() } }
-                        Text(
-                            roadOnly ?: state.maneuverText,
-                            style = if (roadOnly != null) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
-                            maxLines = if (roadOnly != null) 1 else 2,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
-            // The trip's own figures along the bottom, as Google's mini map shows them (user
-            // 2026-09-25): time left and arrival, the same numbers the nav bar shows. Distance is
-            // left out: at the mini window's width it only ever showed as a trailing "...".
-            androidx.compose.material3.Surface(
-                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(4.dp),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                contentColor = MaterialTheme.colorScheme.onSurface,
-            ) {
-                val secs = state.nav.remainingDuration
-                Row(Modifier.padding(horizontal = 10.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        formatDuration(secs),
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                    )
-                    Text(
-                        " · " + app.vela.ui.formatArrivalClock(secs),
-                        style = MaterialTheme.typography.bodySmall,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
+        PipNavOverlay(state, pipUi)
     }
 }
 
@@ -3485,12 +3452,12 @@ private fun SearchResults(
                             color = SheetPalette.TrafficRed,
                             modifier = Modifier.padding(top = 3.dp),
                         )
-                    } else place.statusText?.let { status ->
+                    } else (app.vela.ui.DemoClock.status(place)?.first ?: place.statusText)?.let { status ->
                         Text(
                             status,
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.Medium,
-                            color = placeStatusColor(status, place.openNow),
+                            color = placeStatusColor(status, app.vela.ui.DemoClock.status(place)?.second ?: place.openNow),
                             modifier = Modifier.padding(top = 3.dp),
                         )
                     }
@@ -3560,6 +3527,7 @@ private fun MapSurface(
     navBarTopPx: Float,
     navOverviewTick: Int,
     navRecenterTick: Int,
+    onNavRecenter: () -> Unit,
     screenHeightPx: Float,
     svPose: DoubleArray?,
     metersPerPixelState: MutableState<Double>,
@@ -3570,12 +3538,17 @@ private fun MapSurface(
     onOverlayState: (String) -> Unit,
     onNavZoomOverride: (Boolean) -> Unit,
 ) {
+    // The MAP can be lit apart from the chrome (Settings > Appearance > Map): the style, the route
+    // colors and the map's own overlays take these; sheets, cards and bars keep the app theme.
+    // Resolved HERE, not in MapScreen, whose method is at ART's verifier limit (PipNavOverlay).
+    val mapDark = app.vela.ui.theme.isMapDark()
+    val mapAmoled = app.vela.ui.theme.isMapAmoled()
     val context = LocalContext.current
     // MapTiler (when a key is built in) gives the Google-like look + its own
     // light/dark styles; otherwise fall back to the keyless OpenFreeMap basemap
     // with our own dark/light recolor.
     val mapStyleUri = if (hasMapTiler) {
-        val variant = if (darkTheme) "streets-v2-dark" else "streets-v2"
+        val variant = if (mapDark) "streets-v2-dark" else "streets-v2"
         "https://api.maptiler.com/maps/$variant/style.json?key=${BuildConfig.MAPTILER_KEY}"
     } else {
         // Liberty is swapped for the cached Roboto-glyph patch when MapFonts has it
@@ -3676,6 +3649,11 @@ private fun MapSurface(
             else -> null
         },
         transitNavLeg = state.transitNav?.stepIndex,
+        tripEndpoints = if (state.transitNav == null && state.directionsOpen && !state.navigating && !state.replaying &&
+            state.travelMode == app.vela.core.model.TravelMode.TRANSIT && state.transitPreview == null) {
+            listOfNotNull(state.directionsOrigin?.location ?: state.myLocation) +
+                state.directionsWaypoints.map { it.location } + listOfNotNull(state.selected?.location)
+        } else emptyList(),
         // Grayed, tappable alternates (Google-style) — only off-nav, with a chooser up.
         alternates = if (state.navigating) emptyList() else run {
             val activeIdx = state.routes.indexOf(state.activeRoute)
@@ -3683,7 +3661,7 @@ private fun MapSurface(
                 if (i != activeIdx && r.polyline.size >= 2) i to r.polyline else null
             }
         },
-        altColor = if (darkTheme) "#C8CDD4" else "#9AA0A6",
+        altColor = if (mapDark) "#C8CDD4" else "#9AA0A6",
         onSelectAlternate = vm::selectRoute,
         // Every route wears its time on the map, placed where it runs apart from the others;
         // tapping a bubble picks that route. Both choosers (the classic one since 2026-09-17).
@@ -3722,7 +3700,16 @@ private fun MapSurface(
         navNorthUp = state.navNorthUp,
         // The compass below the nav card is the heading-up/north-up toggle during a drive
         // (a reorient-to-north tap would be overridden by the follow a frame later anyway).
-        onCompassTap = { if (state.navigating) { vm.toggleNavNorthUp(); true } else false },
+        // Detached (a pan, overview or step preview), the follow camera is not drawing, so a bare
+        // toggle showed nothing: switch the mode and re-center so the change is visible.
+        onCompassTap = {
+            if (!state.navigating) false
+            else {
+                vm.toggleNavNorthUp()
+                if (state.navCameraDetached || state.previewStepIndex != null) onNavRecenter()
+                true
+            }
+        },
         poisEnabled = app.vela.ui.MapPoiPrefs.showPois.value,
         // The POI bitmaps are fixed pixels, so below hdpi they render physically huge (a 240x320
         // phone at 120 dpi, issue #400, showed pins a fifth of the screen wide). Below 1.75x the
@@ -3740,8 +3727,8 @@ private fun MapSurface(
         onUserPan = onUserPan,
         onScaleChanged = { metersPerPixelState.value = it },
         onOverlayState = onOverlayState,
-        darkTheme = darkTheme,
-        amoled = amoled,
+        darkTheme = mapDark,
+        amoled = mapAmoled,
         applyKeylessTheme = !hasMapTiler,
         // Off-nav: the whole-map raster when the user toggles it on. During nav we
         // DON'T wash the whole map — the user asked for traffic on "just the road
@@ -3841,6 +3828,168 @@ private fun MapSurface(
 /** Building-overlay debug badge + UI-thread FPS readout (Settings -> Developer). Split out of
  *  MapScreen on 2026-09-13: the MapScreen composable had grown past the JVM 64 KB method limit
  *  in the debug variant (Compose source info counts), and this block was the cleanest cut. */
+/** The classic route chooser, split out of MapScreen (verifier limit, see PipNavOverlay). With the
+ *  Google-style picker on, the TRANSIT tab still uses this body (the laid-out time and vehicle
+ *  chips suit transit) under the picker's own header, so switching modes reads as one sheet. */
+@Composable
+private fun BoxScope.ClassicDirectionsHost(
+    state: MapUiState,
+    vm: MapViewModel,
+    onStartNav: () -> Unit,
+    dirPanTick: Int,
+    onMinimized: (Boolean) -> Unit,
+    bodyMaxDp: Float?,
+    landscapeChrome: Boolean,
+    sidePanelWidthDp: androidx.compose.ui.unit.Dp,
+    onTopPx: (Int) -> Unit,
+) {
+    val ctx = LocalContext.current
+    val destLabel = if (state.directionsReversed) (state.directionsOrigin?.name ?: stringResource(R.string.mapscreen_your_location))
+    else (state.selected?.name ?: stringResource(R.string.mapscreen_destination))
+    DirectionsPanel(
+        onShowTraffic = if (app.vela.ui.RouteTrafficOnTap.on.value && !state.routeTrafficRequested && !app.vela.ui.GoogleFree.on.value && state.travelMode != app.vela.core.model.TravelMode.WALK) vm::requestRouteTraffic else null,
+        destinationName = destLabel,
+        currentMode = state.travelMode,
+        routes = state.routes,
+        activeRoute = state.activeRoute,
+        flockOnRoute = state.flockOnRoute,
+        transit = state.transit,
+        transitLoading = state.transitLoading,
+        modeEtas = state.modeEtas,
+        onModeSelected = vm::setTravelMode,
+        avoidTolls = state.avoidTolls,
+        avoidHighways = state.avoidHighways,
+        avoidFerries = state.avoidFerries,
+        onAvoidTolls = vm::setAvoidTolls,
+        onAvoidHighways = vm::setAvoidHighways,
+        onAvoidFerries = vm::setAvoidFerries,
+        onSelectRoute = vm::selectRoute,
+        onStartNav = onStartNav,
+        minimizeTick = dirPanTick,
+        onSteps = if (state.activeRoute != null) vm::openSteps else null,
+        onSearchAlongRoute = vm::searchAlongRoute,
+        onWalkDirections = vm::walkDirections,
+        onStartTransit = vm::startTransitNav,
+        onTransitPreview = vm::onTransitRowExpanded,
+        onTimeSelected = vm::setDirectionsTime,
+        transitPrefer = state.transitPrefer,
+        onTransitPrefer = vm::setTransitPrefer,
+        transitRoutePref = state.transitRoutePref,
+        onTransitRoutePref = vm::setTransitRoutePref,
+        onCollapsedChange = onMinimized,
+        bodyMaxDp = bodyMaxDp,
+        googleHeader = app.vela.ui.RoutePicker.googleStyle.value,
+        onShare = {
+            val dest = state.selected
+            val body = listOfNotNull(
+                destLabel,
+                dest?.let { "geo:${it.location.lat},${it.location.lng}?q=${it.location.lat},${it.location.lng}(${android.net.Uri.encode(it.name)})" },
+            ).joinToString("\n")
+            runCatching {
+                ctx.startActivity(
+                    android.content.Intent.createChooser(
+                        android.content.Intent(android.content.Intent.ACTION_SEND).setType("text/plain").putExtra(android.content.Intent.EXTRA_TEXT, body),
+                        null,
+                    ),
+                )
+            }
+        },
+        onClose = vm::clearRoute,
+        // Landscape: a LEFT side panel, width-capped, exactly like the place and results
+        // sheets beside it (issue #297). As a full-width bottom sheet its open height ate
+        // a landscape screen whole - the map was not merely obscured, it was completely
+        // gone, which is a poor way to ask someone to choose between routes drawn on it.
+        modifier = Modifier
+            .align(if (landscapeChrome) Alignment.BottomStart else Alignment.BottomCenter)
+            .onGloballyPositioned { onTopPx(it.boundsInWindow().top.roundToInt()) }
+            .landscapeColumn(landscapeChrome, sidePanelWidthDp),
+    )
+}
+
+/** The picture-in-picture overlay: the turn card across the top and the trip's figures along the
+ *  bottom. Split out of MapScreen (2026-09-28): the MapScreen method sits at ART's verifier limit
+ *  and two more direct calls in it made the release build fail verification (a VerifyError at
+ *  launch on Android 14, a silently dead screen on 16). */
+@Composable
+private fun BoxScope.PipNavOverlay(state: MapUiState, pipUi: Boolean) {
+    if (pipUi && state.navigating && state.maneuverText.isNotEmpty()) {
+        // The one PiP overlay, Google's shape: the turn card's own green with the glyph, the
+        // distance as the headline and the turn text under it, across the top of the window.
+        // The old dark strip put everything on one small line and read as a caption
+        // (user 2026-09-13: hard to parse next to Google's).
+        val next = state.activeRoute?.maneuvers?.getOrNull(state.nav.stepIndex)
+        androidx.compose.material3.Surface(
+            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(4.dp),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ) {
+            Row(
+                Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (next != null) {
+                    Icon(
+                        app.vela.ui.nav.maneuverIconFor(next),
+                        contentDescription = null,
+                        modifier = Modifier.size(30.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                }
+                Column {
+                    Text(
+                        formatDistance(state.nav.distanceToNextManeuver),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                    )
+                    // The road the turn enters, not the whole sentence: "Turn left o..." said
+                    // nothing at the mini map's width; "County Rte E8" does.
+                    val roadOnly = next?.let { m -> m.ref?.takeIf { it.isNotBlank() } ?: m.road?.takeIf { it.isNotBlank() } }
+                    Text(
+                        roadOnly ?: state.maneuverText,
+                        style = if (roadOnly != null) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.bodySmall,
+                        maxLines = if (roadOnly != null) 1 else 2,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        // The trip's own figures along the bottom, as Google's mini map shows them (user
+        // 2026-09-25): time left and arrival, the same numbers the nav bar shows. Distance is
+        // left out: at the mini window's width it only ever showed as a trailing "...".
+        // Same container as the turn card above it, and centered (user 2026-09-28: the gray
+        // strip read as a different kind of thing under the green card). The arrival clock is
+        // formatArrivalClock, which follows the phone's 12/24-hour setting (Clock24).
+        androidx.compose.material3.Surface(
+            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(4.dp),
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+        ) {
+            val secs = state.nav.remainingDuration
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    formatDuration(secs),
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+                Text(
+                    " · " + app.vela.ui.formatArrivalClock(secs),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun BoxScope.BuildingDebugBadge(overlayDebugState: String) {
     val label = when {
@@ -4892,12 +5041,26 @@ private fun InfoCard(
     modifier: Modifier = Modifier,
     pillLabel: String? = null,
     onPill: (() -> Unit)? = null,
+    // Self-dismissing after this long, with the faster-route card's draining bar as the clock;
+    // focus anywhere on the card (reaching for it with keys) freezes it. Null = stays put.
+    autoMs: Long? = null,
 ) {
     // Fixed sheet palette so this banner reads as the same gray as the place sheet
     // and results list, not a wallpaper-tinted Material card.
     val dark = isAppInDarkTheme()
+    val left = remember(body, autoMs) { androidx.compose.animation.core.Animatable(1f) }
+    val dismiss = rememberUpdatedState(onAction)
+    var held by remember(body) { mutableStateOf(false) }
+    if (autoMs != null) {
+        LaunchedEffect(body, autoMs, held) {
+            if (held) return@LaunchedEffect
+            val remaining = (autoMs * left.value).toInt()
+            left.animateTo(0f, androidx.compose.animation.core.tween(remaining.coerceAtLeast(1), easing = androidx.compose.animation.core.LinearEasing))
+            dismiss.value()
+        }
+    }
     Card(
-        modifier.fillMaxWidth(),
+        modifier.fillMaxWidth().onFocusChanged { held = it.hasFocus },
         colors = CardDefaults.cardColors(containerColor = SheetPalette.bg(dark)),
     ) {
         if (pillLabel != null && onPill != null) {
@@ -4932,6 +5095,9 @@ private fun InfoCard(
                 }
                 TextButton(onClick = onAction) { Text(actionLabel) }
             }
+        }
+        if (autoMs != null) {
+            app.vela.ui.VelaProgressBarOf({ left.value }, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp))
         }
     }
 }
@@ -5661,10 +5827,11 @@ private fun SpeedWidget(
 @Composable
 private fun ScaleBarReader(
     state: MutableState<Double>,
-    dark: Boolean,
     modifier: Modifier = Modifier,
 ) {
-    ScaleBar(metersPerPixel = state.value, dark = dark, modifier = modifier)
+    // Drawn on the map, so it follows the MAP's theme (Settings > Appearance > Map), read here
+    // rather than in MapScreen, which has no bytecode to spare (see PipNavOverlay).
+    ScaleBar(metersPerPixel = state.value, dark = app.vela.ui.theme.isMapDark(), modifier = modifier)
 }
 
 /**
@@ -5767,7 +5934,10 @@ private fun barRoadName(state: MapUiState): String? {
 @Composable
 private fun BoxScope.AreaPickOverlay(state: MapUiState, vm: MapViewModel, zoomButtons: Boolean, onZoom: (Double) -> Unit) {
     val plan = state.areaPick
+    // Cells (part of the region, SPEC 7.6) are the default where the region has them baked; the
+    // whole region stays a choice. Picking one clears the other: they pull the same kind of data.
     var withRegion by remember { mutableStateOf(true) }
+    var withCells by remember { mutableStateOf(true) }
     val scrim = Color.Black.copy(alpha = 0.45f)
     val edge = MaterialTheme.colorScheme.primary
     androidx.compose.foundation.Canvas(Modifier.matchParentSize()) {
@@ -5821,13 +5991,30 @@ private fun BoxScope.AreaPickOverlay(state: MapUiState, vm: MapViewModel, zoomBu
                     modifier = Modifier.padding(top = 6.dp),
                 )
             } else if (plan != null && region != null) {
+                val cellsOffered = plan.cells.isNotEmpty()
+                if (cellsOffered) {
+                    Row(
+                        Modifier.padding(top = 8.dp)
+                            .dpadHighlight(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                            .toggleable(value = withCells, onValueChange = { v -> withCells = v; if (v) withRegion = false }),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        androidx.compose.material3.Checkbox(checked = withCells, onCheckedChange = null)
+                        Text(
+                            androidx.compose.ui.res.pluralStringResource(R.plurals.area_pick_cells, plan.cells.size, app.vela.ui.settings.sections.fmtMb(plan.cellsMb), plan.cells.size),
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                }
+                val regionOn = withRegion && !(cellsOffered && withCells)
                 Row(
                     Modifier.padding(top = 8.dp)
                         .dpadHighlight(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-                        .toggleable(value = withRegion, onValueChange = { v -> withRegion = v }),
+                        .toggleable(value = regionOn, onValueChange = { v -> withRegion = v; if (v) withCells = false }),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    androidx.compose.material3.Checkbox(checked = withRegion, onCheckedChange = null)
+                    androidx.compose.material3.Checkbox(checked = regionOn, onCheckedChange = null)
                     Text(
                         stringResource(R.string.settings_area_confirm_region, region.name, app.vela.ui.settings.sections.fmtMb(plan.regionMb)),
                         style = MaterialTheme.typography.bodyMedium,
@@ -5854,7 +6041,14 @@ private fun BoxScope.AreaPickOverlay(state: MapUiState, vm: MapViewModel, zoomBu
                 ) { Text(stringResource(R.string.settings_cancel)) }
                 Spacer(Modifier.width(8.dp))
                 Button(
-                    onClick = { vm.downloadPickedArea(withRegion && region != null && plan?.regionInstalled == false) },
+                    onClick = {
+                        val cellsOffered = plan?.cells?.isNotEmpty() == true
+                        val cellsPick = cellsOffered && withCells
+                        vm.downloadPickedArea(
+                            withRegion = withRegion && !cellsPick && region != null && plan?.regionInstalled == false,
+                            withCells = cellsPick,
+                        )
+                    },
                     enabled = plan != null && !plan.tooLarge,
                     shape = androidx.compose.foundation.shape.CircleShape,
                     modifier = Modifier.dpadHighlight(androidx.compose.foundation.shape.CircleShape),

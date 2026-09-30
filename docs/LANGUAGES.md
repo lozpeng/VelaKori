@@ -11,7 +11,8 @@ the canonical list. Update it when a language lands or gains a layer.
 | German | `de` | ✅ | ✅ | ✅ | ✅ |
 | Spanish | `es` | ✅ | ✅ | ✅ (Spain + Mexico voices) | ✅ |
 | Italian | `it` | ✅ | ✅ | ✅ | ✅ |
-| Portuguese | `pt` | ✅ | ✅ | ✅ (Brazilian voice) | ✅ |
+| Portuguese (Portugal) | `pt` | ✅ | ✅ | ✅ (Brazilian voice) | ✅ |
+| Portuguese (Brazil) | `pt-BR` (resources in `values-pt-rBR`) | ✅ (contributed by Netocon, 2026-09-28) | ✅ (shares the Portuguese table) | ✅ | ✅ |
 | Dutch | `nl` | ✅ | ✅ | ✅ | ✅ |
 | Russian | `ru` | ✅ | ✅ | ✅ | ✅ |
 | Polish | `pl` | ✅ | ✅ | ✅ | ✅ |
@@ -30,9 +31,11 @@ mangling it, and a hint points at the voice settings.
 
 The App UI column means the language has its own string file, not that every string in it is
 translated. New features land in English first and show in English until someone fills them in; all
-fifteen files were brought fully up to date with English on 2026-09-25 (about 115 strings each,
-translated per language to match each file's own register and terms). `python3 tools/check-translations.py` lists the missing
-keys per language (and fails only on placeholder drift).
+sixteen files were brought fully up to date with English on 2026-09-28 (the 43 strings added since
+2026-09-25: the offline area picker, the Google request counter, SD card storage and the Maps links
+setting), translated per language to match each file's own register and terms. `python3 tools/check-translations.py` lists the missing
+keys per language (and fails only on placeholder drift); `values-en-rGB` is left out of that list,
+since it only ever carries the few words that differ.
 
 Some context on the columns:
 

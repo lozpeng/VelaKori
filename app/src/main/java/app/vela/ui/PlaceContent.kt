@@ -93,3 +93,72 @@ object HideExternalLinks {
     private fun prefs(c: Context) = c.getSharedPreferences("vela_settings", Context.MODE_PRIVATE)
     private const val KEY = "hide_external_links"
 }
+
+/** Reviews load only when the user taps "Show reviews" on a place (pref `reviews_on_tap`, off). */
+object ReviewsOnTap {
+    val on = mutableStateOf(false)
+
+    fun init(context: Context) {
+        on.value = prefs(context).getBoolean(KEY, false)
+    }
+
+    fun set(context: Context, value: Boolean) {
+        on.value = value
+        prefs(context).edit().putBoolean(KEY, value).apply()
+    }
+
+    private fun prefs(c: Context) = c.getSharedPreferences("vela_settings", Context.MODE_PRIVATE)
+    private const val KEY = "reviews_on_tap"
+}
+
+/** Routes ask Google for live traffic only after the user taps "Show traffic" (pref
+ *  `route_traffic_on_tap`, off). Until then directions come from the open router alone. */
+object RouteTrafficOnTap {
+    val on = mutableStateOf(false)
+
+    fun init(context: Context) {
+        on.value = prefs(context).getBoolean(KEY, false)
+    }
+
+    fun set(context: Context, value: Boolean) {
+        on.value = value
+        prefs(context).edit().putBoolean(KEY, value).apply()
+    }
+
+    private fun prefs(c: Context) = c.getSharedPreferences("vela_settings", Context.MODE_PRIVATE)
+    private const val KEY = "route_traffic_on_tap"
+}
+
+/** Place photos load only when the user taps Show photos (pref `photos_on_tap`, off). */
+object PhotosOnTap {
+    val on = mutableStateOf(false)
+
+    fun init(context: Context) {
+        on.value = prefs(context).getBoolean(KEY, false)
+    }
+
+    fun set(context: Context, value: Boolean) {
+        on.value = value
+        prefs(context).edit().putBoolean(KEY, value).apply()
+    }
+
+    private fun prefs(c: Context) = c.getSharedPreferences("vela_settings", Context.MODE_PRIVATE)
+    private const val KEY = "photos_on_tap"
+}
+
+/** Retry a place's details while popular times are missing (pref `details_retry`, on). Off = one request. */
+object DetailsRetry {
+    val on = mutableStateOf(true)
+
+    fun init(context: Context) {
+        on.value = prefs(context).getBoolean(KEY, true)
+    }
+
+    fun set(context: Context, value: Boolean) {
+        on.value = value
+        prefs(context).edit().putBoolean(KEY, value).apply()
+    }
+
+    private fun prefs(c: Context) = c.getSharedPreferences("vela_settings", Context.MODE_PRIVATE)
+    private const val KEY = "details_retry"
+}

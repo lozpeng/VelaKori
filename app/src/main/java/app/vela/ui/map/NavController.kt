@@ -153,10 +153,9 @@ internal class NavController(
                     it.copy(
                         navigating = ns.navigating,
                         navPaused = ns.paused,
-                        // Every drive starts heading-up (Google's default). The compass toggle is
-                        // per-drive, not sticky: a north-up pick from a previous session used to
-                        // leak into the next drive's opening frames.
-                        navNorthUp = if (navStarted) false else it.navNorthUp,
+                        // Every drive starts in the chosen orientation (heading-up unless
+                        // Settings > Navigation says north-up). The compass toggle is per-drive.
+                        navNorthUp = if (navStarted) app.vela.ui.NavNorthUp.on.value else it.navNorthUp,
                         arrived = ns.arrived,
                         nav = ns.nav,
                         maneuverText = ns.maneuverText,
@@ -773,6 +772,12 @@ internal class NavController(
 
     private suspend fun tunnelDeadReckonLoop() {
         while (true) {
+            // Sleep until a drive is on: this loop used to wake every second for the whole life of
+            // the view model, backgrounded or not (audit 2026-09-29).
+            if (!_state.value.navigating) {
+                drProgressM = Double.NaN
+                _state.first { it.navigating }
+            }
             delay(1_000)
             val s = _state.value
             val route = s.activeRoute

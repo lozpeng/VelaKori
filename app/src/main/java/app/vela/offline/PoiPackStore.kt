@@ -27,7 +27,7 @@ class PoiPackStore @Inject constructor(
     @ApplicationContext private val context: Context,
     private val http: OkHttpClient,
 ) {
-    private val packsRoot = File(context.filesDir, "poipacks")
+    private val packsRoot: File get() = File(app.vela.offline.StorageLocation.root(context), "poipacks")
 
     // Packs are hundreds of MB — same no-call-timeout rule as every large download (the shared
     // client's 12 s scrape cap would abort the body mid-read, silently).
@@ -86,7 +86,7 @@ class PoiPackStore @Inject constructor(
 
     private fun writeRev(id: String, rev: Int) = synchronized(revsLock) {
         packsRoot.mkdirs()
-        File(packsRoot, "revs.json").writeText(readRevs().put(id, rev).toString())
+        app.vela.core.util.AtomicFiles.writeText(File(packsRoot, "revs.json"), readRevs().put(id, rev).toString())
     }
 
     /** Download + unzip [region]'s pack to `poipacks/<id>.db` and register it. 0..100 progress. */
@@ -211,11 +211,26 @@ class PoiPackStore @Inject constructor(
         }
     }
 
+    /** Install a pack SQLite already on disk (a grid cell's part) as [id]: the same magic check,
+     *  rename, rev and registration a download ends with. False leaves nothing behind. */
+    fun installFile(id: String, tmp: File, rev: Int): Boolean = runCatching {
+        packsRoot.mkdirs()
+        check(tmp.length() > 16 && tmp.inputStream().use { s ->
+            val magic = ByteArray(15); s.read(magic); String(magic) == "SQLite format 3"
+        }) { "not a SQLite db" }
+        val dest = File(packsRoot, "$id.db")
+        dest.delete()
+        if (!tmp.renameTo(dest)) { tmp.copyTo(dest, overwrite = true); tmp.delete() }
+        writeRev(id, rev)
+        registerPacks()
+        true
+    }.getOrElse { tmp.delete(); false }
+
     fun delete(id: String) {
         File(packsRoot, "$id.db").delete()
         synchronized(revsLock) {
             packsRoot.mkdirs()
-            File(packsRoot, "revs.json").writeText(readRevs().apply { remove(id) }.toString())
+            app.vela.core.util.AtomicFiles.writeText(File(packsRoot, "revs.json"), readRevs().apply { remove(id) }.toString())
         }
         registerPacks()
     }

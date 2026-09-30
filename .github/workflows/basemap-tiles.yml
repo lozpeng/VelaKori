@@ -6,11 +6,8 @@ name: Offline basemap tiles
 # download gets routing, places and the map picture as one set. ADDITIVE and reversible.
 
 on:
-  schedule:
-    # Monthly, from the current Geofabrik extracts: the 9th bakes the first half of the catalog by
-    # id, the 10th the second (the matrix caps at 256 jobs).
-    - cron: "0 5 9 * *"
-    - cron: "0 5 10 * *"
+  # No cron of its own: the bake conductor (bake-conductor.yml, tools/bake-schedule.json)
+  # dispatches it, one heavy bake at a time, with API budget to spare (2026-09-29).
   workflow_dispatch:
     inputs:
       group:
@@ -21,10 +18,17 @@ on:
         description: "Explicit region ids (space or comma separated); overrides group"
         required: false
         default: ""
+      shard:
+        description: "Half of the whole catalog by id: a or b (blank = use group/ids). The conductor's dispatch."
+        required: false
+        default: ""
       maxzoom:
         description: "Tile max zoom (14 = full detail, overzoomed past it)"
         required: false
         default: "14"
+      rev:
+        description: "Revision stamp to publish as (blank = today, UTC); set it to test the patch path on a same-day rebake"
+        required: false
 
 permissions:
   contents: write
@@ -35,7 +39,7 @@ jobs:
     outputs:
       matrix: ${{ steps.sel.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: sel
         env:
           GROUP: ${{ inputs.group }}
@@ -43,11 +47,7 @@ jobs:
         run: |
           ids_json=$(jq -cn --arg s "$IDS" '$s | gsub(",";" ") | split(" ") | map(select(length > 0))')
           groups_json=$(jq -cn --arg s "$GROUP" '$s | gsub(",";" ") | split(" ") | map(select(length > 0))')
-          HALF=""
-          case "${{ github.event.schedule }}" in
-            "0 5 9 * *") HALF=a ;;
-            "0 5 10 * *") HALF=b ;;
-          esac
+          HALF="${{ inputs.shard }}"
           sel=$(jq -c --arg group "$GROUP" --argjson groups "$groups_json" --argjson ids "$ids_json" --arg half "$HALF" '
             [ .regions[]
               | select(
@@ -83,13 +83,13 @@ jobs:
       max-parallel: 4
       matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
       - name: Cache planetiler base data
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: data/sources
           key: planetiler-sources-v1
@@ -132,6 +132,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The published archive, fetched BEFORE this bake replaces it, for the patch below. Here and
+          # not before the bake so it does not share the disk with planetiler's working files.
+          REV=$(date -u +%Y%m%d)
+          [ -n "${{ inputs.rev }}" ] && REV="${{ inputs.rev }}"
+          PREV_REV=$(curl -sL "https://github.com/$GITHUB_REPOSITORY/releases/download/basemap-tiles/basemap-manifest.json" \
+            | jq -r --arg id "${{ matrix.id }}" '.regions[] | select(.id == $id) | .rev // 0' | head -1)
+          if [ -n "$PREV_REV" ] && [ "$PREV_REV" != "0" ] && [ "$PREV_REV" != "null" ] && [ "$PREV_REV" != "$REV" ]; then
+            curl -sfL -o prev.pmtiles "https://github.com/$GITHUB_REPOSITORY/releases/download/basemap-tiles/basemap-${{ matrix.id }}.pmtiles" || rm -f prev.pmtiles
+          fi
           # GitHub's asset upload answers 500 on big archives often enough to fail a run on its own;
           # retry with a backoff like the places bake (the bake itself is the expensive part).
           for try in 1 2 3 4; do
@@ -142,14 +151,39 @@ jobs:
           done
           mkdir -p entries
           SIZE=$(stat -c %s "basemap-${{ matrix.id }}.pmtiles")
+          DELTA=null
+          # A patch against the published archive, built, applied to a copy and fingerprint-checked
+          # here or not published (same rule as the places bake).
+          if [ -f prev.pmtiles ]; then
+            if python3 scripts/pmtiles-make-patch.py prev.pmtiles "basemap-${{ matrix.id }}.pmtiles" \
+                 patch.vpatch --rev-from "$PREV_REV" --rev-to "$REV"; then
+              PSIZE=$(stat -c %s patch.vpatch)
+              if [ "$PSIZE" -lt "$((SIZE / 3))" ] && cp prev.pmtiles check.pmtiles && \
+                 python3 scripts/pmtiles-apply-patch.py check.pmtiles patch.vpatch --verify; then
+                PNAME="basemap-${{ matrix.id }}.$PREV_REV.vpatch"
+                mv patch.vpatch "$PNAME"
+                if gh release upload basemap-tiles "$PNAME" --clobber --repo "$GITHUB_REPOSITORY"; then
+                  DELTA=$(jq -n --argjson fromRev "$PREV_REV" \
+                    --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/basemap-tiles/$PNAME" \
+                    --argjson sizeMb "$(echo "scale=2; $PSIZE/1000000" | bc)" \
+                    '{fromRev:$fromRev,url:$url,sizeMb:$sizeMb}')
+                  echo "patch $PNAME: $(echo "scale=1; $PSIZE/1000000" | bc) MB of $(echo "scale=1; $SIZE/1000000" | bc) MB"
+                fi
+              else
+                echo "patch not published: $(echo "scale=1; $PSIZE/1000000" | bc) MB against a $(echo "scale=1; $SIZE/1000000" | bc) MB archive is too big, or it did not verify"
+              fi
+            fi
+            rm -f check.pmtiles prev.pmtiles patch.vpatch
+          fi
           # Bounds from the archive header (the routing catalog carries none): the PMTiles v3 header
           # stores them as int32 E7 at bytes 102..117 (min lon, min lat, max lon, max lat). No CLI
           # needed; the pmtiles CLI download was rate-limited on shared runners and lost entries.
           BBOX=$(python3 scripts/pmtiles-bbox.py "basemap-${{ matrix.id }}.pmtiles" | python3 scripts/clamp-bbox.py "${{ matrix.id }}")
           jq -n --arg id "${{ matrix.id }}" --arg name "${{ matrix.name }}" \
             --arg url "https://github.com/$GITHUB_REPOSITORY/releases/download/basemap-tiles/basemap-${{ matrix.id }}.pmtiles" \
-            --argjson sizeMb "$(echo "scale=2; $SIZE/1000000" | bc)" --argjson bbox "$BBOX" --argjson rev "$(date -u +%Y%m%d)" \
-            '{id:$id,name:$name,url:$url,sizeMb:$sizeMb,bbox:$bbox,rev:$rev}' > "entries/${{ matrix.id }}.json"
+            --argjson sizeMb "$(echo "scale=2; $SIZE/1000000" | bc)" --argjson bbox "$BBOX" --argjson rev "$REV" \
+            --argjson delta "$DELTA" \
+            '{id:$id,name:$name,url:$url,sizeMb:$sizeMb,bbox:$bbox,rev:$rev} + (if $delta == null then {} else {delta:$delta} end)' > "entries/${{ matrix.id }}.json"
       - uses: actions/upload-artifact@v4
         with:
           name: basemap-entry-${{ matrix.id }}
@@ -162,7 +196,7 @@ jobs:
     # No concurrency group (2026-09-22): a pending job in one is cancelled when a newer run
     # joins, and every cancellation is a failure email; the merge derives from the release.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:

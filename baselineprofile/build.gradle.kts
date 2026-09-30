@@ -20,10 +20,10 @@ plugins {
 
 android {
     namespace = "app.vela.baselineprofile"
-    compileSdk = 36   // 与主项目对齐
+    compileSdk = 37   // 与主项目对齐
     defaultConfig {
         minSdk = 28   // 宏基准测试要求 API 28+
-        targetSdk = 36
+        targetSdk = 37
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {

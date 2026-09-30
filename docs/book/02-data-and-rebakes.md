@@ -67,19 +67,38 @@ filtered, and their sub-area rows cover them. 63 rows are `big: true` (over 450 
 
 ### When each rebake runs
 
-All times UTC. Every one of these can also be dispatched by hand from the Actions tab.
+**One bake at a time, started by the bake conductor** (`bake-conductor.yml`, hourly at :05,
+`scripts/bake-conductor.py`, schedule in `tools/bake-schedule.json`). The data bakes have no crons
+of their own since 2026-09-29: on their own clocks they overlapped, and every bake shares the
+repository's 1,000 GitHub API requests an hour with CI and each other, so a heavy night failed the
+canary release, the F-Droid index and the bakes themselves with HTTP 403 and mailed a failure per
+region. Each hour the conductor:
 
-| What | When |
+1. settles the run it started last: success marks the job fresh; failed regions are queued for a
+   retry of exactly those regions (a fresh dispatch with the job's region-list input, at most three
+   retries a cycle); a run where only the manifest step failed is rerun (`gh run rerun --failed`);
+2. starts nothing while any heavy bake is running (any workflow in the schedule) or while fewer than 400 API requests are left this hour;
+3. otherwise starts ONE bake: a pending retry first, else the most overdue job.
+
+Its own run never fails, so it cannot mail a failure. Its record is `state.json` on the
+`bake-conductor` release (targeted at the root commit, like the cells releases, so it never sorts
+above an app release); the run summary shows every job's last good bake and next due date.
+
+| Job (`tools/bake-schedule.json`) | Due every |
 | --- | --- |
-| Surveillance cameras | **Weekly**, Mondays 08:17 |
-| Offline place search (`poi-packs`) | **Monthly**, the 3rd and the 5th at 07:15: half the catalog each by sorted id (the 256-job cap) |
-| Road features | **Monthly**, the 4th and the 6th at 07:45, half the catalog each |
-| Open places, full | **Monthly**, the 6th and the 7th at 05:00: half the catalog each by sorted id, because a job matrix caps at 256 |
-| Open places, rolling | **Nightly** at 04:40: one seventh of the catalog |
-| Offline basemap | **Monthly**, the 9th and the 10th at 05:00, split in halves the same way (the 447 rows without `skip_obf`) |
-| Buildings, house numbers, speed limits | **Quarterly**, January / April / July / October, the 2nd at 04:00, dispatched by `quarterly-data-refresh` (speed limits as two halves, `shard=a` then `shard=b`) |
-| Offline routing (`obf-regions`) | **Manual only** |
+| Open places, one seventh of the catalog (`places-slice`, the weekday's seventh) | 24 h |
+| Offline place search, two halves (`poi-a`, `poi-b`) | 30 days |
+| Road features, two halves | 30 days |
+| Offline basemap, two halves | 30 days |
+| Grid cells: US, and the rest of the catalog in two sets | 30 days |
+| Buildings (`us`, `world`, `chunk`), house numbers, speed limits (two halves) | 90 days |
+| Surveillance cameras | **Weekly** cron, Mondays 08:17 (small, not a heavy bake) |
+| Offline routing (`obf-regions`, with the highway hierarchy), US and the rest in two sets | 90 days, into the STAGING manifest; copying staging over the live `obf-manifest.json` stays a human step |
 | World floor | **Manual only** (`world-lowzoom.yml` with `publish: true`) |
+
+Every workflow can still be dispatched by hand from the Actions tab; the conductor sees a
+hand-started bake as running and waits for it. Changing a cadence or adding a bake is an edit to
+`tools/bake-schedule.json`, not a new cron.
 
 The monthly places bake always bakes against the newest Overture release in the public bucket
 (a dispatch can pin one; the fallback is `2026-08-19.0`), and since 2026-09-22 against the newest
@@ -87,18 +106,17 @@ AllThePlaces run too (`runs/latest.json`; the fixed id `2026-09-05-13-32-25` is 
 when that fetch fails). Before that, every bake since 2026-09-15 carried the same week-old chain
 locator data while AllThePlaces publishes weekly.
 
-**The nightly seventh.** OpenStreetMap is a real source of places, not just a donor of positions,
-and it is the one source anybody can fix. So a seventh of the places catalog rebakes every night:
-the catalog is sorted by id, and a row bakes on the night where `index % 7` equals the weekday
-(Monday = 0). Every region comes round once a week, always on the same night, about 64 regions a
-night. A seventh rather than everything because every rebake republishes the archive, and anyone
+**The daily seventh.** OpenStreetMap is a real source of places, not just a donor of positions,
+and it is the one source anybody can fix. So a seventh of the places catalog rebakes every day:
+the catalog is sorted by id, and a row bakes on the day where `index % 7` equals the weekday
+(Monday = 0, UTC). Every region comes round once a week, always on the same weekday, about 64 regions a
+day. A seventh rather than everything because every rebake republishes the archive, and anyone
 who downloaded the region is offered it again; streaming users pick it up with no prompt at all.
 
-**The quarterly group.** `quarterly-data-refresh` fires three building dispatches (groups `us`,
-`world`, `chunk`, five seconds apart), one house-number dispatch with `all=true` and two
-speed-limit dispatches (`all=true`, `shard=a` then `shard=b`), and exits; each workflow then runs on its own clock. It no
-longer touches routing: the obf bake stays manual on purpose, because runner memory limits and the
-staging-to-live manifest copy are human steps.
+**The quarterly group.** The conductor runs the building groups, the house numbers and the two
+speed-limit halves as separate jobs, one after another. `quarterly-data-refresh` is kept for a
+manual all-at-once refresh (it fires them together, which is what the conductor exists to avoid).
+The obf bake runs into the staging manifest; the staging-to-live copy stays a human step.
 
 A rebake **overwrites the current generation in place**: same asset names, same manifest. New
 generations only fork when a file format changes, which is a deliberate cutover, never a cron.
@@ -298,6 +316,9 @@ making every downloader take a few hundred MB again. On 2026-09-22 the live plac
   also carries a change to the bake script usually fails the one-third test and gets no patch
   (Guernsey and Jersey the day after the OSM source landed: 2506 of 4586 tiles, 2.17 MB against
   3.3 MB, refused); nothing checks for script changes as such.
+- **The map bake does the same since 2026-09-28** (`basemap-<id>.<fromRev>.vpatch` on
+  `basemap-tiles`), fetching the old archive after planetiler finishes so the two do not share the
+  runner's disk. `repair-basemap-manifest.sh` finds the patch by name like the places repair.
   `places-churn.yml` measures real churn by baking one region twice against OSM extracts N days
   apart (Andorra, six days: 11% of tiles, 25% of bytes, a delta at 22% of a full download).
 - **Applied in place.** `PmtilesPatch` (format `VELAPTCH`, `VERSION = 2`) appends the changed tile
@@ -317,12 +338,15 @@ making every downloader take a few hundred MB again. On 2026-09-22 the live plac
 - **Policy is the user's, and on Wi-Fi by default.** Settings > Offline maps > "Update downloaded
   regions": "Never on its own" (`RegionUpdates.Mode.OFF`), "On Wi-Fi" (an unmetered network, as the
   system judges it; the default since 2026-09-25) or "On Wi-Fi and mobile data". It was off until
-  somebody had watched a patch download and apply on a real phone, which happened on 2026-09-19. On Wi-Fi or mobile, a minute after the app
-  starts and at most once in 20 hours (`AUTO_PATCH_DELAY_MS = 60_000`, `AUTO_PATCH_EVERY_MS` = 20 h),
+  somebody had watched a patch download and apply on a real phone, which happened on 2026-09-19. On Wi-Fi or mobile the app checks a minute after it
+  starts (`AUTO_PATCH_DELAY_MS = 60_000`), every 3 hours after that (`AUTO_PATCH_POLL_MS`), and 15 s
+  after a validated network appears; a check that read the manifests waits 20 hours
+  (`AUTO_PATCH_EVERY_MS`) before the next one, a check that could not read them retries.
+  Then
   every installed places or basemap archive and place pack whose manifest publishes a patch from the
   installed revision takes it quietly; routing files publish no patches and a full re-download is
-  never automatic. The mode also decides whether a tap on Update may patch; otherwise the tap
-  downloads the archive whole, over the installed copy, which stays until the new one is complete.
+  never automatic. A tap on Update always tries the patch first, whatever the mode; without one
+  it downloads the archive whole, over the installed copy, which stays until the new one is complete.
   Every attempt is recorded in the diagnostics ring (kind `delta`, `auto:` for the daily pass) and
   in logcat under `VelaDelta`.
 - **Place packs have their own deltas.** `poipack_delta.py` publishes a row-level SQLite delta
@@ -330,7 +354,7 @@ making every downloader take a few hundred MB again. On 2026-09-22 the live plac
   installed pack's rev equals `fromRev`, independent of the setting above. Basemap, obf and the
   overlays have no delta: an update is a full download.
 
-So a fix that lands in OpenStreetMap reaches people in this order: the region's night comes round
+So a fix that lands in OpenStreetMap reaches people in this order: the region's day comes round
 (within a week), streaming users see it once their cache lets go, and people who downloaded the
 region see an Update the next time they open Offline maps, within the hour of the bake.
 

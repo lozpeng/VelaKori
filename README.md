@@ -13,7 +13,7 @@ Live traffic, real place data and turn-by-turn navigation, with zero Google on y
 [![License: GPL v3](https://img.shields.io/github/license/PimpinPumpkin/Vela?color=blue)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/PimpinPumpkin/Vela?style=flat&color=ffd43b)](https://github.com/PimpinPumpkin/Vela/stargazers)
 
-[Install](#install) · [What you get](#what-you-get) · [FAQ](docs/FAQ.md) · [The book](docs/book/README.md) · [Privacy](#privacy) · [How it works](SPEC.md) · [Build](docs/BUILDING.md) · [Discussions](https://github.com/PimpinPumpkin/Vela/discussions) · [Translate](docs/TRANSLATING.md)
+[Install](#install) · [What you get](#what-you-get) · [Docs](https://pimpinpumpkin.github.io/Vela/docs/) · [FAQ](docs/FAQ.md) · [The book](docs/book/README.md) · [Privacy](#privacy) · [How it works](SPEC.md) · [Build](docs/BUILDING.md) · [Discussions](https://github.com/PimpinPumpkin/Vela/discussions) · [Translate](docs/TRANSLATING.md)
 
 [<img src="https://img.shields.io/badge/VISIT%20THE%20WEBSITE-149387?style=for-the-badge" alt="Visit the website">](https://pimpinpumpkin.github.io/Vela/)
 
@@ -46,7 +46,7 @@ to. It looks like Google Maps because that is the point; underneath, almost none
 | The places drawn on the map | **Nothing, by default.** Open data baked in this repo: Overture Maps and AllThePlaces, positioned with OpenStreetMap |
 | Drop a pin, tap a house number | **Nothing.** OpenStreetMap's Nominatim names the spot |
 | Read a departure board | **Nothing, for the stops Vela draws from open transit data:** the board comes from Transitous. Where Transitous has no coverage, Vela falls back to the stop's Google page |
-| Ask for directions | **The traffic, and only the traffic.** The route itself is computed by open OSRM, or on the phone from an OsmAnd-format region file (Google's own route only if the open router is down); Google is asked anonymously for the live ETA on top of it, and every couple of minutes while you drive, which Settings → Navigation turns off |
+| Ask for directions | **The traffic, and only the traffic.** The route itself is computed by open OSRM, or on the phone from an OsmAnd-format region file (Google's own route only if the open router is down); Google is asked anonymously for the live ETA on top of it, and every couple of minutes while you drive, which Settings → Navigation turns off. For a walk Google is asked once for its route, used only when it is much shorter |
 | Type a search | **Your text, anonymously**, like a logged-out browser. Typing sends Google's own autocomplete each time you pause; submitting sends a Google search. Text that starts with a house number also goes to the open Photon geocoder |
 | Tap a place | **An anonymous lookup of that place** - no account, no app key. Hours, reviews and photos are the things only Google does well. Settings → Places can stop the lookup for places tapped on the map |
 | Everything you save | **Nothing, ever.** No account, no Vela backend, no Vela telemetry; saved places, history and settings stay on the phone |
@@ -126,7 +126,9 @@ the F-Droid repo fingerprint in [FDROID.md](FDROID.md), which signs the repo
 index rather than the app.
 
 There's also a one-page tour at
-**[pimpinpumpkin.github.io/Vela](https://pimpinpumpkin.github.io/Vela/)**.
+**[pimpinpumpkin.github.io/Vela](https://pimpinpumpkin.github.io/Vela/)**, and every doc in this
+repository (the FAQ, the book, the full specification) is published there as a searchable site at
+**[pimpinpumpkin.github.io/Vela/docs](https://pimpinpumpkin.github.io/Vela/docs/)**.
 
 [![Support Vela on Buy Me a Coffee](https://img.shields.io/badge/support%20vela-buy%20me%20a%20coffee-ffdd00)](https://buymeacoffee.com/PimpinPumpkin)
 

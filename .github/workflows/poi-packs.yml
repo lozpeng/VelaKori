@@ -12,9 +12,8 @@ name: Build offline place packs
 on:
   # Monthly refresh: rebuild EVERY cataloged region from current OSM and publish row-level deltas
   # alongside the full zips, so installed packs can update without a full re-download.
-  schedule:
-    - cron: "15 7 3 * *" # half a
-    - cron: "15 7 5 * *" # half b
+  # No cron of its own: the bake conductor (bake-conductor.yml, tools/bake-schedule.json)
+  # dispatches it, one heavy bake at a time, with API budget to spare (2026-09-29).
   workflow_dispatch:
     inputs:
       group:
@@ -53,7 +52,7 @@ jobs:
       matrix: ${{ steps.sel.outputs.matrix }}
       count: ${{ steps.sel.outputs.count }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: sel
         env:
           GROUP: ${{ inputs.group }}
@@ -71,7 +70,7 @@ jobs:
             [ .regions[]
               | select(
                   if ($ids|length) > 0 then (.id as $rid | $ids | index($rid)) != null
-                  elif $event == "schedule" then true
+                  elif $event == "schedule" or $group == "all" then true
                   elif $group == "all-sub" then (.group | endswith("-sub"))
                   else (.group as $g | $groups | index($g)) != null end )
               | select( ($skipBig | not) or (.big != true) )
@@ -94,10 +93,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view poi-packs --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create poi-packs --repo "$GITHUB_REPOSITORY" --prerelease \
-              --title "Offline place packs" \
-              --notes "Prebuilt SQLite place/address packs (OpenStreetMap, ODbL) for Vela offline search. Data assets, not a code release."
+          source scripts/gh-retry.sh
+          ensure_release() {
+            gh release view poi-packs --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+              gh release create poi-packs --repo "$GITHUB_REPOSITORY" --prerelease \
+                --title "Offline place packs" \
+                --notes "Prebuilt SQLite place/address packs (OpenStreetMap, ODbL) for Vela offline search. Data assets, not a code release."
+          }
+          gh_retry ensure_release
 
   build:
     needs: prep
@@ -107,7 +110,7 @@ jobs:
       max-parallel: 12
       matrix: ${{ fromJSON(needs.prep.outputs.matrix) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install tools
         run: sudo apt-get update && sudo apt-get install -y osmium-tool jq zip unzip python3
       - name: Build ${{ matrix.id }} + upload zip + emit entry
@@ -128,7 +131,7 @@ jobs:
     if: ${{ !cancelled() }} # merge whatever succeeded, even if some regions failed
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
       - uses: actions/download-artifact@v4

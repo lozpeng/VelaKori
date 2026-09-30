@@ -77,7 +77,7 @@ internal fun OfflineSettingsScreen(vm: MapViewModel, onBack: () -> Unit, onClose
     val context = LocalContext.current
     var confirmRegion by remember { mutableStateOf<app.vela.offline.RoutingRegion?>(null) }
     confirmRegion?.let { region ->
-        val packRegion = state.poiPackRegions.firstOrNull { it.id == region.id }
+        val packRegion = vm.autoPackFor(region)
         app.vela.ui.VelaDialog(
             onDismissRequest = { confirmRegion = null },
             title = stringResource(R.string.settings_region_confirm_title, region.name),
@@ -213,6 +213,38 @@ internal fun OfflineSettingsScreen(vm: MapViewModel, onBack: () -> Unit, onClose
                 ) { Text(stringResource(R.string.settings_delete_offline_all)) }
             }
             Hint(stringResource(R.string.settings_delete_offline_all_hint))
+            // Internal storage or the SD card (issue #613). Shown only with a card present, or with
+            // the card chosen and gone (so the reason downloads look missing is on screen).
+            val loc = app.vela.offline.StorageLocation
+            val hasCard = remember(state.storageMovePct) { loc.sdDir(context) != null }
+            if (hasCard || loc.mode.value == loc.SD) {
+                GroupDivider()
+                SubHead(stringResource(R.string.settings_storage))
+                val moving = state.storageMovePct
+                if (moving != null) {
+                    Hint(stringResource(R.string.settings_storage_moving, moving))
+                    androidx.compose.material3.LinearProgressIndicator(
+                        progress = { moving / 100f },
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    )
+                    androidx.compose.foundation.layout.Box(Modifier.padding(horizontal = 8.dp)) {
+                        androidx.compose.material3.TextButton(
+                            onClick = { vm.cancelStorageMove() },
+                            modifier = Modifier.dpadHighlight(androidx.compose.foundation.shape.CircleShape),
+                        ) { Text(stringResource(R.string.settings_cancel)) }
+                    }
+                } else {
+                    listOf(loc.INTERNAL to R.string.settings_storage_internal, loc.SD to R.string.settings_storage_sd).forEach { (key, label) ->
+                        app.vela.ui.settings.SelectableRow(
+                            label = stringResource(label),
+                            selected = loc.mode.value == key,
+                            onClick = { if (loc.mode.value != key) vm.moveOfflineStorage(key) },
+                        )
+                    }
+                    if (loc.cardMissing(context)) Hint(stringResource(R.string.settings_storage_missing))
+                    else Hint(stringResource(R.string.settings_storage_hint))
+                }
+            }
         }
         Spacer(Modifier.height(8.dp))
         // WHAT IS ON THE PHONE, right under the storage figures and the delete button (issue #601):
@@ -225,7 +257,8 @@ internal fun OfflineSettingsScreen(vm: MapViewModel, onBack: () -> Unit, onClose
         val primary = state.routingRegions.filter { r -> loc != null && r.covers(loc.lat, loc.lng) }
             .minByOrNull { (it.n - it.s) * (it.e - it.w) }
         SettingsGroup {
-            if (regions.isEmpty() && installedRegions.isEmpty()) {
+            val cellGroups = state.cellsInstalled.groupBy { it.regionId }.values.sortedBy { it.first().regionName }
+            if (regions.isEmpty() && installedRegions.isEmpty() && cellGroups.isEmpty()) {
                 Hint(stringResource(R.string.settings_downloaded_none))
             }
             regions.forEachIndexed { ri, r ->
@@ -246,6 +279,41 @@ internal fun OfflineSettingsScreen(vm: MapViewModel, onBack: () -> Unit, onClose
             installedRegions.sortedBy { it.name }.forEachIndexed { ri, region ->
                 if (ri > 0 || regions.isNotEmpty()) GroupDivider()
                 RegionRow(region, state, vm, primary?.id, indent = false, onConfirm = { confirmRegion = it })
+            }
+            // Grid cells: part of a region pulled by the area picker (SPEC 7.6), one row per region
+            // with every cell's parts summed; delete takes all of that region's cells.
+            cellGroups.forEachIndexed { ri, cells ->
+                if (ri > 0 || regions.isNotEmpty() || installedRegions.isNotEmpty()) GroupDivider()
+                val first = cells.first()
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(first.regionName.ifBlank { first.regionId }, style = MaterialTheme.typography.bodyMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                        Text(
+                            androidx.compose.ui.res.pluralStringResource(R.plurals.settings_downloaded_cells, cells.size, cells.size, fmtMb(Math.round(cells.sumOf { it.mb }).toInt())),
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        val newer = state.cellUpdates[first.regionId].orEmpty()
+                        if (newer.isNotEmpty()) {
+                            Text(
+                                androidx.compose.ui.res.pluralStringResource(R.plurals.settings_cells_update_available, newer.size, newer.size),
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                    if (state.cellUpdates[first.regionId].orEmpty().isNotEmpty()) {
+                        FilledTonalButton(
+                            onClick = { vm.updateCells(first.regionId) },
+                            enabled = state.routingDownloadingId == null && state.poiPackDownloadingId == null && state.regionUpdatingId == null,
+                            modifier = Modifier.dpadHighlight(androidx.compose.foundation.shape.CircleShape),
+                        ) { Text(stringResource(R.string.settings_update_region)) }
+                    }
+                    IconButton(modifier = Modifier.dpadHighlight(androidx.compose.foundation.shape.CircleShape), onClick = { vm.deleteCellRegion(first.regionId) }) {
+                        Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.settings_offline_delete_cells))
+                    }
+                }
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -415,7 +483,10 @@ private fun ParentRow(
     val pieces = node.pieces
     val missing = pieces.filter { it.id !in state.routingInstalledIds }
     val batchActive = state.regionQueueTotal > 0 && pieces.any { it.id == state.routingDownloadingId }
-    val totalMb = pieces.sumOf { p -> regionInstalledMb(p, state.poiPackRegions.firstOrNull { it.id == p.id }, state.regionExtrasMb[p.id] ?: 0) }
+    // A shared parent pack counts once for the whole group, not once per piece.
+    val sharedPacks = pieces.mapNotNull { p -> vm.autoPackFor(p)?.takeIf { it.id != p.id } }.distinctBy { it.id }
+    val totalMb = pieces.sumOf { p -> regionInstalledMb(p, vm.autoPackFor(p)?.takeIf { it.id == p.id }, state.regionExtrasMb[p.id] ?: 0) } +
+        sharedPacks.sumOf { packInstalledMb(it) }
     Row(
         Modifier.fillMaxWidth()
             .dpadHighlight(androidx.compose.foundation.shape.RoundedCornerShape(10.dp))
@@ -472,15 +543,17 @@ private fun RegionRow(
 ) {
     val installed = region.id in state.routingInstalledIds
     val downloading = state.routingDownloadingId == region.id
-    val packDownloading = state.poiPackDownloadingId == region.id
+    // The region's own place pack, or its parent's for a piece of a split country or state.
+    val pack = vm.packFor(region)
+    val packDownloading = pack != null && state.poiPackDownloadingId == pack.id
     val updating = state.regionUpdatingId == region.id && !downloading && !packDownloading
-    val packInstalled = region.id in state.poiPackInstalledIds
-    // A fresher pack is published than the one installed → offer an in-place update
-    // (a small row-level delta when the manifest carries one, else a full re-download).
-    val packRegion = state.poiPackRegions.firstOrNull { it.id == region.id }
+    val packInstalled = pack != null && pack.id in state.poiPackInstalledIds
+    // What a download of this region brings, for the size shown before it is installed.
+    val packRegion = vm.autoPackFor(region)
     // A newer bake of the pack, the places, the map or the routing file: one Update.
-    val updateAvailable = (installed && packInstalled && packRegion != null &&
-        packRegion.rev > (state.poiPackInstalledRevs[region.id] ?: 0)) ||
+    // (A fresher pack is updated in place: a row-level delta when the manifest has one.)
+    val updateAvailable = (installed && packInstalled && pack != null &&
+        pack.rev > (state.poiPackInstalledRevs[pack.id] ?: 0)) ||
         state.regionUpdates.containsKey(region.id)
     val here = region.id == primaryId
     Row(
@@ -504,6 +577,15 @@ private fun RegionRow(
                 color = if ((here && !installed && !downloading) || updateAvailable) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            // A piece of a split country or state shares its parent's pack: say whose, and how big,
+            // before "Get places" (Germany's is 1.9 GB and does not come with a piece by itself).
+            if (installed && !packInstalled && pack != null && app.vela.offline.RegionPacks.isShared(region, pack)) {
+                Text(
+                    stringResource(R.string.settings_places_shared_pack, pack.name.substringBefore(" (").trim(), fmtMb(packInstalledMb(pack))),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
         // D-pad: same swap-in control as the voice rows (Download -> spinner ->
         // Get places/Delete) - the keeper re-places focus on the new variant so
@@ -531,7 +613,7 @@ private fun RegionRow(
             }
             // Installed before place packs existed (or its pack was skipped): offer just
             // the pack, so offline search covers the region without a graph re-download.
-            installed && !packInstalled -> Row(verticalAlignment = Alignment.CenterVertically) {
+            installed && !packInstalled && pack != null -> Row(verticalAlignment = Alignment.CenterVertically) {
                 DpadFocusHandoff(keeper)
                 FilledTonalButton(
                     onClick = { vm.downloadPoiPackFor(region) },
@@ -593,9 +675,13 @@ private fun StorageRow(label: String, mb: Int, onClick: (() -> Unit)? = null) {
  *  same download pulls, MapUiState.regionExtrasMb) install together, so the shown number is their SUM. */
 internal fun regionInstalledMb(graph: app.vela.offline.RoutingRegion, pack: app.vela.offline.RoutingRegion?, extraMb: Int = 0): Int {
     val g = if (graph.installedMb > 0) graph.installedMb else graph.sizeMb
-    val p = pack?.let { if (it.installedMb > 0) it.installedMb else (it.sizeMb * 2.35).toInt() } ?: 0
-    return g + p + extraMb
+    return g + (pack?.let(::packInstalledMb) ?: 0) + extraMb
 }
+
+/** A place pack's size once unpacked (the manifest's zip size times the usual ratio when the
+ *  manifest does not say). */
+internal fun packInstalledMb(pack: app.vela.offline.RoutingRegion): Int =
+    if (pack.installedMb > 0) pack.installedMb else (pack.sizeMb * 2.35).toInt()
 
 internal fun fmtMb(mb: Int): String =
     if (mb >= 1024) String.format(java.util.Locale.getDefault(), "%.1f GB", mb / 1024f) else "$mb MB"

@@ -63,6 +63,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
@@ -143,11 +144,17 @@ fun GoogleStyleDirectionsPanel(
     /** Landscape: the column is short, so the card tightens up and its middle scrolls. */
     compact: Boolean = false,
     modifier: Modifier = Modifier,
+    onShowTraffic: (() -> Unit)? = null,
 ) {
     val dark = isAppInDarkTheme()
     val ink = SheetPalette.ink(dark)
     val dim = SheetPalette.dim(dark)
     val collapsed = remember { mutableStateOf(true) } // Google opens at the summary, not the list
+    // A third, smaller state below the summary (issue #616): the time and Start on one line, so a
+    // small screen can see the route. Handle tap: summary <-> minimized (list -> summary); swipe
+    // down from the summary minimizes, swipe up restores; a map pan minimizes.
+    val minimized = remember { mutableStateOf(false) }
+    var downPull by remember { mutableStateOf(0f) }
     val bodyMax = (LocalConfiguration.current.screenHeightDp * 0.58f).let { cap -> bodyMaxDp?.let { minOf(cap, it) } ?: cap }
     val bodyH = remember { Animatable(0f) }
     val settleSpec = remember { spring<Float>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 350f) }
@@ -162,10 +169,18 @@ fun GoogleStyleDirectionsPanel(
     }
     fun dragBy(dyPx: Float) {
         val dyDp = with(density) { dyPx.toDp().value }
+        if (minimized.value) { downPull += dyDp; return }
+        if (bodyH.value <= 0f && dyDp > 0f) downPull += dyDp else if (dyDp < 0f) downPull = 0f
         scope.launch { bodyH.snapTo((bodyH.value - dyDp).coerceIn(0f, bodyMax)) }
     }
     fun settle(velocityPxPerSec: Float) {
         val vDp = with(density) { velocityPxPerSec.toDp().value }
+        val pulled = downPull; downPull = 0f
+        if (minimized.value) {
+            if (vDp < -FLING_COMMIT_DPS || pulled < -40f) minimized.value = false
+            return
+        }
+        if (bodyH.value <= 0f && (vDp > FLING_COMMIT_DPS || pulled > 40f)) { minimized.value = true; return }
         val naturalEnd = decay.calculateTargetValue(bodyH.value, -vDp)
         val target = when {
             vDp < -FLING_COMMIT_DPS -> bodyMax
@@ -193,8 +208,9 @@ fun GoogleStyleDirectionsPanel(
     }
     var seenTick by remember { mutableStateOf(minimizeTick) }
     LaunchedEffect(minimizeTick) {
-        if (minimizeTick == seenTick || collapsed.value) return@LaunchedEffect
+        if (minimizeTick == seenTick) return@LaunchedEffect
         seenTick = minimizeTick
+        if (collapsed.value) { minimized.value = true; return@LaunchedEffect }
         bodyH.animateTo(0f, settleSpec)
         collapsed.value = true
     }
@@ -211,11 +227,40 @@ fun GoogleStyleDirectionsPanel(
                 .padding(top = if (compact) 2.dp else 6.dp, bottom = if (compact) 6.dp else 12.dp),
         ) {
             Box(
-                Modifier.fillMaxWidth().dpadHighlight(RoundedCornerShape(8.dp)).clickable { collapsed.value = !collapsed.value }
+                Modifier.fillMaxWidth().dpadHighlight(RoundedCornerShape(8.dp)).clickable {
+                    if (!collapsed.value) collapsed.value = true else minimized.value = !minimized.value
+                }
                     .padding(vertical = if (compact) 2.dp else 6.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Box(Modifier.width(36.dp).height(4.dp).clip(CircleShape).background(dim.copy(alpha = 0.4f)))
+            }
+            if (minimized.value) {
+                val r = activeRoute ?: routes.firstOrNull()
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 20.dp, end = 16.dp, top = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (r == null) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.weight(1f))
+                    } else {
+                        val eta = r.durationInTrafficSeconds ?: r.durationSeconds
+                        Text(
+                            buildAnnotatedString {
+                                withStyle(SpanStyle(color = trafficEtaColor(r) ?: ink, fontWeight = FontWeight.Medium, fontSize = 20.sp)) { append(formatDuration(eta)) }
+                                withStyle(SpanStyle(color = dim, fontSize = 16.sp)) { append(" (${formatDistance(r.distanceMeters)})") }
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        Button(onClick = onStartNav) {
+                            Icon(Icons.Default.Navigation, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.place_start))
+                        }
+                    }
+                }
+                return@Column
             }
             // Header: the mode is the title, the actions are round buttons (Google's grammar). In
             // landscape the title gives way to the tabs, which name the mode anyway.
@@ -317,6 +362,9 @@ fun GoogleStyleDirectionsPanel(
                         } else {
                             Spacer(Modifier.height(6.dp))
                             Text(stringResource(R.string.exp_chooser_alts_none), style = MaterialTheme.typography.bodyMedium, color = dim)
+                        }
+                        if (onShowTraffic != null && routes.isNotEmpty()) {
+                            TrafficOnTapRow(onShowTraffic, ink, Modifier.padding(top = 2.dp))
                         }
                     }
                 }
@@ -518,7 +566,7 @@ fun GoogleStyleDirectionsPanel(
 }
 
 @Composable
-private fun modeTitle(mode: TravelMode): String = stringResource(
+internal fun modeTitle(mode: TravelMode): String = stringResource(
     when (mode) {
         TravelMode.DRIVE -> R.string.place_mode_drive
         TravelMode.TRANSIT -> R.string.place_mode_transit
@@ -529,7 +577,7 @@ private fun modeTitle(mode: TravelMode): String = stringResource(
 
 /** Google's round header action: a tonal circle with a glyph. */
 @Composable
-private fun RoundAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, dark: Boolean, onClick: () -> Unit) {
+internal fun RoundAction(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, dark: Boolean, onClick: () -> Unit) {
     IconButton(
         onClick = onClick,
         modifier = Modifier
@@ -546,12 +594,14 @@ private fun RoundAction(icon: androidx.compose.ui.graphics.vector.ImageVector, l
 /** Mode tabs: glyph + time, the selected one in the accent with an underline. In landscape they
  *  share the header row with the round actions, which is the only way the card fits the column. */
 @Composable
-private fun ModeTabs(
+internal fun ModeTabs(
     currentMode: TravelMode,
     modeEtas: Map<TravelMode, String>,
     ink: androidx.compose.ui.graphics.Color,
     onModeSelected: (TravelMode) -> Unit,
     modifier: Modifier = Modifier,
+    /** D-pad: where focus lands when the panel opens (the Drive tab). */
+    firstFocus: androidx.compose.ui.focus.FocusRequester? = null,
 ) {
     Row(modifier.horizontalScroll(rememberScrollState()).padding(start = 8.dp)) {
         listOf(
@@ -563,7 +613,7 @@ private fun ModeTabs(
             val sel = mode == currentMode
             val tint = if (sel) MaterialTheme.colorScheme.primary else ink
             Column(
-                Modifier
+                (if (mode == TravelMode.DRIVE && firstFocus != null) Modifier.focusRequester(firstFocus) else Modifier)
                     .clip(RoundedCornerShape(8.dp))
                     .dpadHighlight(RoundedCornerShape(8.dp))
                     .clickable { onModeSelected(mode) }

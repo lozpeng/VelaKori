@@ -12,6 +12,9 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
+import app.vela.core.model.TransitItinerary
+import app.vela.core.model.LatLng
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -98,15 +101,25 @@ object Transitous {
 
     /** The board for a KNOWN stop (a tapped map icon) - no proximity lookup needed. Queries the
      *  parent station when the stop has one, so a hub icon shows the whole merged board. */
-    fun boardFor(http: OkHttpClient, stop: MapStop): StopDepartures? {
+    fun boardFor(http: OkHttpClient, stop: MapStop, timeEpochSec: Long? = null): StopDepartures? {
         val ids = (listOf(stop.parentId ?: stop.stopId) + stop.siblingIds).distinct()
-        val times = ids.flatMap { stopTimes(http, it) }.ifEmpty { return null }
+        val times = timesFor(http, ids, timeEpochSec).ifEmpty { return null }
         return buildBoard(times, stationName = stop.name)
     }
 
-    /** The next [n] departures at [stopId] (a parent-station id aggregates all its child stops). */
-    fun stopTimes(http: OkHttpClient, stopId: String, n: Int = 50): List<StopTime> {
-        val url = "$BASE/api/v1/stoptimes?stopId=${URLEncoder.encode(stopId, "UTF-8")}&n=$n"
+    private val pool = java.util.concurrent.Executors.newCachedThreadPool { r -> Thread(r, "transitous").apply { isDaemon = true } }
+
+    /** Departures for every id, fetched in parallel, in id order. */
+    private fun timesFor(http: OkHttpClient, ids: List<String>, timeEpochSec: Long? = null): List<StopTime> =
+        if (ids.size <= 1) ids.flatMap { stopTimes(http, it, timeEpochSec = timeEpochSec) }
+        else ids.map { id -> pool.submit<List<StopTime>> { stopTimes(http, id, timeEpochSec = timeEpochSec) } }
+            .flatMap { runCatching { it.get() }.getOrDefault(emptyList()) }
+
+    /** The next [n] departures at [stopId] (a parent-station id aggregates all its child stops),
+     *  from now or from [timeEpochSec]. */
+    fun stopTimes(http: OkHttpClient, stopId: String, n: Int = 50, timeEpochSec: Long? = null): List<StopTime> {
+        val url = "$BASE/api/v1/stoptimes?stopId=${URLEncoder.encode(stopId, "UTF-8")}&n=$n" +
+            (timeEpochSec?.let { "&time=" + java.time.Instant.ofEpochSecond(it) } ?: "")
         val body = get(http, url) ?: return emptyList()
         return runCatching { json.decodeFromString<StopTimesResp>(body).stopTimes }.getOrDefault(emptyList())
     }
@@ -118,7 +131,7 @@ object Transitous {
      * countdowns, day markers) renders it unchanged. Null when Transitous has nothing here (no
      * coverage, no stop, network failure) - the caller falls back to the Google path.
      */
-    fun board(http: OkHttpClient, lat: Double, lng: Double): StopDepartures? {
+    fun board(http: OkHttpClient, lat: Double, lng: Double, timeEpochSec: Long? = null): StopDepartures? {
         val stops = stopsNear(http, lat, lng)
         if (stops.isEmpty()) return null
         // Prefer the nearest stop's PARENT station (aggregates every bay), and fold in any
@@ -131,7 +144,7 @@ object Transitous {
                 distM(nearest.lat, nearest.lon, it.lat, it.lon) < COLOCATED_M }
             .map { it.parentId ?: it.stopId }
             .distinct()
-        val times = ids.flatMap { stopTimes(http, it) }.ifEmpty { return null }
+        val times = timesFor(http, ids, timeEpochSec).ifEmpty { return null }
         return buildBoard(times, stationName = nearest.name)
     }
 
@@ -220,6 +233,7 @@ object Transitous {
     }
 
     private const val PAIR_MERGE_M = 160.0
+    private const val LAP_SAME_STOP_M = 30.0
     private const val COLOCATED_M = 3.0
 
     /** Pure grouping of raw stop times into the board model (unit-tested; no network). */
@@ -309,14 +323,17 @@ object Transitous {
      * SAME [TransitStep] the timeline UI already renders. Null on any failure - the caller falls back
      * to the itinerary-reuse path.
      */
-    fun tripStops(http: OkHttpClient, tripId: String, atLat: Double, atLng: Double): TransitStep? {
+    fun tripStops(http: OkHttpClient, tripId: String, atLat: Double, atLng: Double, atEpochSec: Long? = null): TransitStep? {
         val body = get(http, "$BASE/api/v1/trip?tripId=${URLEncoder.encode(tripId, "UTF-8")}") ?: return null
         val leg = runCatching { json.decodeFromString<TripResp>(body).legs.firstOrNull() }.getOrNull() ?: return null
-        return buildTripStep(leg, atLat, atLng)
+        return buildTripStep(leg, atLat, atLng, atEpochSec)
     }
 
-    /** Pure mapping of a trip leg into the timeline's [TransitStep] (unit-tested; no network). */
-    internal fun buildTripStep(leg: TripLeg, atLat: Double, atLng: Double): TransitStep? {
+    /** Pure mapping of a trip leg into the timeline's [TransitStep] (unit-tested; no network).
+     *  [atEpochSec] is the tapped departure's time: on a LOOPING trip (one GTFS trip for a whole
+     *  day of laps, which some agencies publish) the tapped stop recurs every lap, and the time
+     *  picks the lap. */
+    internal fun buildTripStep(leg: TripLeg, atLat: Double, atLng: Double, atEpochSec: Long? = null): TransitStep? {
         val all = buildList {
             add(leg.from)
             addAll(leg.intermediateStops)
@@ -327,10 +344,20 @@ object Transitous {
         // GTFS stop AND from a Google-resolved listing on a different corner); the stops the run
         // already called at go into priorStops so the view can show them grayed above, Google-style.
         // A terminus tap boards at the origin instead (an arrivals-only view has no ride left).
-        val idx = (all.indices.minByOrNull { i -> distM(atLat, atLng, all[i].lat, all[i].lon) } ?: 0)
-            .let { if (it >= all.size - 1) 0 else it }
-        val prior = all.subList(0, idx).map { st -> stopTime(st, legCanceled = leg.cancelled) }
-        val mapped = all.subList(idx, all.size).map { st -> stopTime(st, legCanceled = leg.cancelled) }
+        val dist = all.map { distM(atLat, atLng, it.lat, it.lon) }
+        val nearest = dist.minOrNull() ?: 0.0
+        // Every pass the trip makes at the tapped stop (a loop calls there once per lap).
+        val passes = all.indices.filter { dist[it] <= nearest + LAP_SAME_STOP_M }
+        val epochOf = { st: TripStop -> (st.departure ?: st.arrival ?: st.scheduledDeparture ?: st.scheduledArrival)?.let { parseIso(it) } }
+        val pick = if (atEpochSec != null && passes.size > 1)
+            passes.minByOrNull { i -> epochOf(all[i])?.let { kotlin.math.abs(it - atEpochSec) } ?: Long.MAX_VALUE } ?: passes.first()
+        else passes.firstOrNull() ?: 0
+        val idx = if (pick >= all.size - 1) 0 else pick
+        // One lap: from the previous pass (where this lap began) to the next one (where it ends).
+        val lapStart = passes.lastOrNull { it < idx } ?: 0
+        val lapEnd = passes.firstOrNull { it > idx }?.let { it + 1 } ?: all.size
+        val prior = all.subList(lapStart, idx).map { st -> stopTime(st, legCanceled = leg.cancelled) }
+        val mapped = all.subList(idx, lapEnd).map { st -> stopTime(st, legCanceled = leg.cancelled) }
         return TransitStep(
             mode = modeOf(leg.mode),
             line = TransitLine(
@@ -370,6 +397,130 @@ object Transitous {
             delayMin = if (moved) (((shownEpoch!! - schedEpoch!!) / 60).toInt()) else null,
         )
     }
+
+    // --- directions (fallback) ---------------------------------------------------------------------
+
+    /**
+     * Transit itineraries from Transitous' own planner (`/api/v1/plan`), 2026-09-28. The FALLBACK,
+     * not the primary: Google's transit directions carry traffic-aware and history-aware times where
+     * a GTFS planner knows only the timetable and current lateness, so this runs when Google is off
+     * ("Use Vela without Google") or answered nothing. [timeMode] is Google's: 0 depart at, 1 arrive
+     * by, 2 last available (treated as arrive by). [prefer] is the chooser's vehicle numbering
+     * (0 bus, 1 subway, 2 train, 3 tram); empty = every mode. Same [TransitItinerary] shape the
+     * Google parser feeds, so the chooser, the map drawing and step-by-step guidance render it unchanged.
+     */
+    fun plan(
+        http: OkHttpClient, origin: LatLng, destination: LatLng,
+        timeMode: Int = 0, timeEpochSec: Long? = null, prefer: Set<Int> = emptySet(), max: Int = PLAN_MAX,
+    ): List<TransitItinerary> {
+        val url = buildString {
+            append(BASE).append("/api/v1/plan?fromPlace=").append(origin.lat).append(',').append(origin.lng)
+            append("&toPlace=").append(destination.lat).append(',').append(destination.lng)
+            append("&numItineraries=").append(max)
+            if (timeEpochSec != null) {
+                append("&time=").append(java.time.Instant.ofEpochSecond(timeEpochSec))
+                if (timeMode == 1 || timeMode == 2) append("&arriveBy=true")
+            }
+            val modes = prefer.mapNotNull { PLAN_MODES[it] }
+            if (modes.isNotEmpty()) append("&transitModes=").append(modes.joinToString(","))
+        }
+        val body = get(http, url) ?: return emptyList()
+        return runCatching { parsePlan(body, origin, destination) }.getOrDefault(emptyList())
+    }
+
+    /** The plan reply's itineraries, in the planner's order. Pure; fixture-tested. */
+    internal fun parsePlan(json: String, origin: LatLng, destination: LatLng): List<TransitItinerary> {
+        val root = JSONObject(json)
+        val its = root.optJSONArray("itineraries") ?: return emptyList()
+        return (0 until its.length()).mapNotNull { i -> runCatching { parseItinerary(its.getJSONObject(i), origin, destination) }.getOrNull() }
+    }
+
+    private fun parseItinerary(it: JSONObject, origin: LatLng, destination: LatLng): TransitItinerary? {
+        val legs = it.optJSONArray("legs") ?: return null
+        val steps = ArrayList<TransitStep>()
+        for (i in 0 until legs.length()) {
+            val leg = legs.getJSONObject(i)
+            val mode = leg.optString("mode", "")
+            val from = leg.optJSONObject("from"); val to = leg.optJSONObject("to")
+            val start = parseIso(leg.optString("startTime", "")); val end = parseIso(leg.optString("endTime", ""))
+            val secs = leg.optLong("duration", if (start != null && end != null) end - start else 0L)
+            if (mode == "WALK" || mode == "BIKE" || mode == "CAR" || mode == "RENTAL") {
+                // A transfer walk between two stops, or the first/last mile: the app fetches the
+                // turn-by-turn steps for it on demand from the walk router, like the Google legs.
+                steps += TransitStep(
+                    mode = TransitMode.WALK, durationText = durationText(secs),
+                    walkFrom = from?.let { point(it) } ?: origin, walkTo = to?.let { point(it) } ?: destination,
+                )
+                continue
+            }
+            val tz = from?.optString("tz", null)
+            val line = TransitLine(
+                name = leg.optString("routeShortName", "").ifBlank { leg.optString("displayName", "") }.ifBlank { leg.optString("routeLongName", "") },
+                mode = modeOf(mode),
+                colorHex = leg.optString("routeColor", "").takeIf { it.isNotBlank() }?.let { "#" + it.removePrefix("#") },
+                textColorHex = leg.optString("routeTextColor", "").takeIf { it.isNotBlank() }?.let { "#" + it.removePrefix("#") },
+            )
+            val board = from?.let { stopTime(it, "departure", "scheduledDeparture", tz) }
+            val alight = to?.let { stopTime(it, "arrival", "scheduledArrival", to.optString("tz", null) ?: tz) }
+            val mids = leg.optJSONArray("intermediateStops")?.let { a ->
+                (0 until a.length()).mapNotNull { k -> a.optJSONObject(k)?.let { stopTime(it, "arrival", "scheduledArrival", it.optString("tz", null) ?: tz) } }
+            }.orEmpty()
+            val startSched = parseIso(leg.optString("scheduledStartTime", ""))
+            val delayMin = if (start != null && startSched != null && leg.optBoolean("realTime", false)) ((start - startSched) / 60).toInt() else null
+            steps += TransitStep(
+                mode = line.mode, durationText = durationText(secs), line = line,
+                departText = start?.let { clockText(it, tz) }, arriveText = end?.let { clockText(it, to?.optString("tz", null) ?: tz) },
+                headsign = leg.optString("headsign", "").takeIf { it.isNotBlank() },
+                boardStop = board, alightStop = alight, numStops = mids.size + 1,
+                delayText = delayMin?.let { delayText(it) }, intermediateStops = mids,
+            )
+        }
+        if (steps.none { it.line != null }) return null // a walk-only answer is not a transit trip
+        val startEp = parseIso(it.optString("startTime", "")); val endEp = parseIso(it.optString("endTime", ""))
+        val firstTz = legs.getJSONObject(0).optJSONObject("from")?.optString("tz", null)
+        val lastTz = legs.getJSONObject(legs.length() - 1).optJSONObject("to")?.optString("tz", null) ?: firstTz
+        var agency: String? = null
+        for (i in 0 until legs.length()) legs.getJSONObject(i).optString("agencyName", "").takeIf { it.isNotBlank() }?.let { if (agency == null) agency = it }
+        return TransitItinerary(
+            departureEpochSec = startEp, arrivalEpochSec = endEp,
+            departureText = startEp?.let { clockText(it, firstTz) }, arrivalText = endEp?.let { clockText(it, lastTz) },
+            durationText = durationText(it.optLong("duration", if (startEp != null && endEp != null) endEp - startEp else 0L)),
+            agency = agency, lines = steps.mapNotNull { s -> s.line }, steps = steps,
+        )
+    }
+
+    private fun point(o: JSONObject): LatLng? {
+        val lat = o.optDouble("lat", Double.NaN); val lng = o.optDouble("lon", Double.NaN)
+        return if (lat.isNaN() || lng.isNaN()) null else LatLng(lat, lng)
+    }
+
+    private fun stopTime(o: JSONObject, liveKey: String, schedKey: String, tz: String?): TransitStopTime {
+        val live = parseIso(o.optString(liveKey, "")); val sched = parseIso(o.optString(schedKey, ""))
+        val shown = live ?: sched
+        return TransitStopTime(
+            name = o.optString("name", ""), code = o.optString("stopCode", "").takeIf { it.isNotBlank() },
+            timeText = shown?.let { clockText(it, tz) },
+            scheduledText = if (live != null && sched != null && live != sched) clockText(sched, tz) else null,
+            location = point(o), canceled = o.optBoolean("cancelled", false),
+            delayMin = if (live != null && sched != null && live != sched) ((live - sched) / 60).toInt() else null,
+        )
+    }
+
+    /** "45 min" / "1 h 5 min", the shape the chooser's chips already fold. */
+    internal fun durationText(secs: Long): String {
+        val m = ((secs + 30) / 60).coerceAtLeast(1)
+        return if (m < 60) "$m min" else if (m % 60 == 0L) "${m / 60} h" else "${m / 60} h ${m % 60} min"
+    }
+
+    private fun delayText(min: Int): String? = when {
+        min > 0 -> "$min min late"
+        min < 0 -> "${-min} min early"
+        else -> null
+    }
+
+    private const val PLAN_MAX = 5
+    /** The chooser's vehicle numbers (Google's, issue #431) as the planner's mode names. */
+    private val PLAN_MODES = mapOf(0 to "BUS", 1 to "SUBWAY", 2 to "RAIL", 3 to "TRAM")
 
     // --- helpers ----------------------------------------------------------------------------------
 

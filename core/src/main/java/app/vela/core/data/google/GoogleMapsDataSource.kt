@@ -711,6 +711,9 @@ class GoogleMapsDataSource @Inject constructor(
         if (mode == TravelMode.BICYCLE && RoutingPrefs.bikeSafe) {
             bikeSafeRoutes(origin, destination, waypoints, avoidTolls, avoidHighways, avoidFerries, urgent)?.let { return@io it }
         }
+        if (mode == TravelMode.WALK && waypoints.isEmpty()) {
+            walkRoutes(origin, destination, tries, osrmTryMs, osrmBudget, onOsrmFail, urgent)?.let { return@io it }
+        }
         // Multi-stop (rebuilt 2026-09-21, issue #600): Google is asked for the trip THROUGH the stops
         // (DirectionsPb.withWaypoints) and the open router is routed through them too. Same course =
         // the open route with Google's real through-the-stops time and spans; Google left the course
@@ -731,7 +734,29 @@ class GoogleMapsDataSource @Inject constructor(
                 val gD = if (bounded) kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
                     googleDirectionsRetried(origin, destination, mode, tries, avoidTolls, avoidHighways, avoidFerries, waypoints)
                 } else async { googleDirectionsRetried(origin, destination, mode, tries, avoidTolls, avoidHighways, avoidFerries, waypoints) }
-                val via = viaD.await().firstOrNull()
+                // PHONE FIRST for a trip with stops: the legs chained on the downloaded region.
+                val phoneD = if (urgent && routeEngine.isReady(mode) && routeEngine.covers(origin, destination, mode)) {
+                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+                        runCatching { chainOnDevice(listOf(origin) + waypoints + destination, mode, avoidTolls, avoidHighways, avoidFerries, departBearingDeg) }.getOrNull()
+                    }
+                } else null
+                val via = if (phoneD == null) viaD.await().firstOrNull() else {
+                    val early = kotlinx.coroutines.withTimeoutOrNull(PHONE_FIRST_ONLINE_WAIT_MS) { viaD.await() }
+                    if (!early.isNullOrEmpty()) early.first() else {
+                        val wait = minOf(PHONE_FIRST_ONDEVICE_WAIT_MS, budget.remainingMs() ?: PHONE_FIRST_ONDEVICE_WAIT_MS).coerceAtLeast(0L)
+                        val onDevice = kotlinx.coroutines.withTimeoutOrNull(wait) { phoneD.await() }
+                        if (onDevice != null) {
+                            diag.record(
+                                "directions",
+                                "urgent: phone first, on-device legs ×${waypoints.size} after ${budget.elapsedMs()} ms while the open router was " +
+                                    (if (early == null) "still out" else "empty") + "; the recheck heals traffic",
+                                "",
+                            )
+                            return@coroutineScope listOf(onDevice)
+                        }
+                        (early ?: viaD.await()).firstOrNull()
+                    }
+                }
                 if (bounded && via == null) {
                     // Bounded + open router empty (issue #557): Google's direct route if it is back,
                     // else the on-device legs, else nothing; never past the budget.
@@ -865,7 +890,34 @@ class GoogleMapsDataSource @Inject constructor(
             val googleD = if (bounded) kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
                 googleDirectionsRetried(origin, destination, mode, tries, avoidTolls, avoidHighways, avoidFerries)
             } else async { googleDirectionsRetried(origin, destination, mode, tries, avoidTolls, avoidHighways, avoidFerries) }
-            val open = openD.await()
+            // PHONE FIRST: an urgent reroute over a downloaded region computes the on-device route
+            // in parallel and takes it when the open router is not back inside the short wait.
+            val phoneD = if (urgent && routeEngine.isReady(mode) && routeEngine.covers(origin, destination, mode)) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).async {
+                    runCatching {
+                        routeEngine.route(origin, destination, mode, avoidTolls, avoidHighways, avoidFerries, departBearingDeg)
+                            .map { it.copy(offline = true) }
+                    }.getOrDefault(emptyList())
+                }
+            } else null
+            val open = if (phoneD == null) openD.await() else {
+                val early = kotlinx.coroutines.withTimeoutOrNull(PHONE_FIRST_ONLINE_WAIT_MS) { openD.await() }
+                if (!early.isNullOrEmpty()) early else {
+                    val wait = minOf(PHONE_FIRST_ONDEVICE_WAIT_MS, budget.remainingMs() ?: PHONE_FIRST_ONDEVICE_WAIT_MS).coerceAtLeast(0L)
+                    val onDevice = kotlinx.coroutines.withTimeoutOrNull(wait) { phoneD.await() }.orEmpty()
+                    if (onDevice.isNotEmpty()) {
+                        avoidHonored = true // the obf engine applies the avoid parameters itself
+                        diag.record(
+                            "directions",
+                            "urgent: phone first, on-device route after ${budget.elapsedMs()} ms while the open router was " +
+                                (if (early == null) "still out" else "empty") + "; the recheck heals traffic",
+                            "",
+                        )
+                        return@coroutineScope onDevice
+                    }
+                    early ?: openD.await()
+                }
+            }
             val avoidWanted = (avoidTolls || avoidHighways || avoidFerries) && mode == TravelMode.DRIVE
             if (bounded && open.isEmpty()) {
                 // Bounded + open router empty or hung (issue #557): (a) Google's route from this
@@ -1098,6 +1150,53 @@ class GoogleMapsDataSource @Inject constructor(
      * ([ValhallaRouter]); alternates only for a plain trip. No Google traffic overlay: bikes do not
      * sit in car traffic and Google's bike ETA models a different route. Null when nothing answered.
      */
+    /**
+     * Walking (issue #478): the open router's foot routes, plus Google's walk only when it is at least
+     * [WALK_GOOGLE_SHORTER] shorter (OSM missing a crossing or a path), and then with its own line
+     * kept and its steps named from the map tiles ([LineNamer]), never snapped. Null = the open
+     * router gave nothing and Google's walk could not be named, so the general chain below runs.
+     */
+    private suspend fun walkRoutes(
+        origin: LatLng, destination: LatLng, tries: Int, osrmTryMs: Long?, osrmBudget: RouteBudget,
+        onOsrmFail: (String) -> Unit, urgent: Boolean,
+    ): List<Route>? = coroutineScope {
+        val openD = async {
+            RouteGeometry.route(http, origin, destination, TravelMode.WALK, tries = tries, callTimeoutMs = osrmTryMs, budget = osrmBudget, onFailure = onOsrmFail)
+        }
+        val googleD = async {
+            if (urgent || !app.vela.core.data.RoutingPrefs.googleTraffic) emptyList()
+            else kotlinx.coroutines.withTimeoutOrNull(WALK_GOOGLE_WAIT_MS) {
+                runCatching { googleDirections(origin, destination, TravelMode.WALK, walkCompare = true) }.getOrNull().orEmpty()
+            }.orEmpty()
+        }
+        val open = openD.await()
+        val gTop = googleD.await().firstOrNull()
+        val openTop = open.firstOrNull()
+        val shorter = gTop != null && gTop.polyline.size >= 2 &&
+            (openTop == null || gTop.distanceMeters <= openTop.distanceMeters * (1.0 - WALK_GOOGLE_SHORTER))
+        val t0 = System.currentTimeMillis()
+        var tilesMs = 0L
+        var tileLines = 0
+        val named = if (shorter) {
+            kotlinx.coroutines.withTimeoutOrNull(WALK_NAME_WAIT_MS) {
+                val lines = app.vela.core.data.naming.RoadNameTiles.linesAlong(gTop!!.polyline)
+                tilesMs = System.currentTimeMillis() - t0
+                tileLines = lines?.size ?: -1
+                lines?.let { app.vela.core.data.naming.LineNamer.name(gTop, it, TravelMode.WALK) }
+            }
+        } else null
+        val line = "walk: open ${openTop?.distanceMeters?.toInt()} m, google ${gTop?.distanceMeters?.toInt()} m" +
+            (if (shorter) (if (named != null) ", google named (${named.maneuvers.size} steps)" else ", google shorter but not named") else "") +
+            (if (shorter) " tiles ${tilesMs} ms ($tileLines lines), named share ${"%.2f".format(app.vela.core.data.naming.LineNamer.lastNamedShare)}, total ${System.currentTimeMillis() - t0} ms" else "")
+        diag.record("directions", line)
+        android.util.Log.d("VelaWalk", line)
+        when {
+            named != null -> listOf(named) + open
+            open.isNotEmpty() -> open
+            else -> null
+        }
+    }
+
     private suspend fun bikeSafeRoutes(
         origin: LatLng,
         destination: LatLng,
@@ -1285,8 +1384,13 @@ class GoogleMapsDataSource @Inject constructor(
         // The avoid flags ride along on the snap, but they add nothing on the public server:
         // OSRM_SUPPORTS_EXCLUDE is off, so no `exclude=` is sent and the vias alone hold the
         // snap to Google's chosen path.
-        val named = RouteGeometry.routeVia(http, vias, mode, avoidTolls, avoidHighways, avoidFerries).firstOrNull()
+        // The traffic snap's guards (issue #478): a sampled point that lands on a flyover deck, the
+        // far carriageway or a dead-end lane forces an out-and-back or a loop, so the snap must reach
+        // the destination, stay within SNAP_LENGTH_SLACK of the route it names, and carry no spur.
+        val named = RouteGeometry.routeVia(http, vias, mode, avoidTolls, avoidHighways, avoidFerries, strictVias = true).firstOrNull()
             ?.takeIf { it.polyline.lastOrNull()?.let { p -> p.distanceTo(destination) <= SNAP_REACH_M } == true }
+            ?.takeIf { it.distanceMeters <= route.distanceMeters * SNAP_LENGTH_SLACK + SNAP_LENGTH_SLACK_M }
+            ?.takeIf { !spurWithTurn(it, route.polyline) }
         // Keep the route's OWN time figures through the snap. The picker sorted and displayed this
         // route by its Google per-route ETA; applyTraffic here would swap in a recomputed one
         // (OSRM free-flow x the ratio) IN PLACE, which can leapfrog a neighboring row and leave
@@ -1298,9 +1402,13 @@ class GoogleMapsDataSource @Inject constructor(
             durationSeconds = route.durationSeconds,
             durationInTrafficSeconds = route.durationInTrafficSeconds,
         )
-        // Naming failed: nav runs on Google's abbreviated steps. Tagged so the in-drive recheck
-        // can silently upgrade to full steps once the open router answers again.
-        else route.copy(provisional = false, abbreviatedSteps = true, source = RouteSource.GOOGLE_ABBREVIATED)
+        // The snap failed or was refused: keep Google's line and name its turns from the map tiles
+        // (LineNamer). Only when that fails too does nav run on Google's abbreviated steps, tagged so
+        // the in-drive recheck can silently upgrade to full steps once the open router answers.
+        else kotlinx.coroutines.withTimeoutOrNull(WALK_NAME_WAIT_MS) {
+            app.vela.core.data.naming.RoadNameTiles.linesAlong(route.polyline)
+                ?.let { app.vela.core.data.naming.LineNamer.name(route, it, mode) }
+        } ?: route.copy(provisional = false, abbreviatedSteps = true, source = RouteSource.GOOGLE_ABBREVIATED)
     }
 
     /** [googleDirections] with the same transient-blip retry the OSRM path has (routeOsrm goes
@@ -1314,6 +1422,7 @@ class GoogleMapsDataSource @Inject constructor(
      *  free-flow exactly as before, just honestly rarer. */
     private suspend fun googleDirectionsRetried(origin: LatLng, destination: LatLng, mode: TravelMode, tries: Int = 3, avoidTolls: Boolean = false, avoidHighways: Boolean = false, avoidFerries: Boolean = false, waypoints: List<LatLng> = emptyList()): List<Route> {
         var routes: List<Route> = emptyList()
+        if (!app.vela.core.data.RoutingPrefs.googleTraffic) return routes
         for (attempt in 0 until tries) {
             if (attempt > 0) kotlinx.coroutines.delay(app.vela.core.util.Jitter.around(300L * attempt, 0.5))
             routes = runCatching { googleDirections(origin, destination, mode, avoidTolls, avoidHighways, avoidFerries, waypoints) }.getOrNull().orEmpty()
@@ -1326,11 +1435,16 @@ class GoogleMapsDataSource @Inject constructor(
     /** Google's keyless directions — now the FALLBACK router (OSRM unreachable) and the
      *  live-traffic source (ETA / duration-in-traffic / congestion spans). Its step list is
      *  abbreviated for long routes, which is exactly why OSRM is primary. */
-    private suspend fun googleDirections(origin: LatLng, destination: LatLng, mode: TravelMode, avoidTolls: Boolean = false, avoidHighways: Boolean = false, avoidFerries: Boolean = false, waypoints: List<LatLng> = emptyList()): List<Route> {
+    private suspend fun googleDirections(origin: LatLng, destination: LatLng, mode: TravelMode, avoidTolls: Boolean = false, avoidHighways: Boolean = false, avoidFerries: Boolean = false, waypoints: List<LatLng> = emptyList(), walkCompare: Boolean = false): List<Route> {
         // Without Google the open router's answer stands alone: no traffic, no Google alternates,
         // no abbreviated fallback. Every caller already handles an empty reply as "Google did not
         // answer", which is exactly the state this is.
-        if (app.vela.core.data.NoGoogle.enabled) return emptyList()
+        if (app.vela.core.data.NoGoogle.enabled || !app.vela.core.data.RoutingPrefs.googleTraffic) return emptyList()
+        // Walking is the open router's (issue #478): Google adds no traffic on foot, its keyless
+        // walking steps are abbreviated, and snapping a foot route through points on its line forces
+        // crossings and double-backs (measured +20-110% on Davis, Sacramento and Dhaka walks). Only
+        // the walking branch of directions() asks, to see whether Google's walk is much shorter.
+        if (mode == TravelMode.WALK && !walkCompare) return emptyList()
         session.ensure()
         val cal = calibration.current()
         val pb = DirectionsPb.build(origin, destination, mode, cal.directionsPb, avoidTolls, avoidHighways, avoidFerries, waypoints)
@@ -1503,6 +1617,16 @@ class GoogleMapsDataSource @Inject constructor(
         const val AVOID_ONDEVICE_TIMEOUT_MS = 4_000L
         /** A mid-drive reroute waits this long for Google's traffic once the open router has answered. */
         const val URGENT_GOOGLE_GRACE_MS = 2_500L
+        /** PHONE FIRST (2026-09-28): with a downloaded region under the whole trip, a mid-drive
+         *  reroute starts the on-device route at once and takes it when the open router has not
+         *  answered inside this wait; a healthy open router answers in 1 to 3 s, a hung one used to
+         *  hold the driver on "Re-routing" for the attempt's whole deadline (issues #557, #258).
+         *  The on-device route is trafficless, so the degraded recheck (20 s) swaps in the online
+         *  route on the same course, or offers it as a faster route on another. */
+        const val PHONE_FIRST_ONLINE_WAIT_MS = 2_500L
+        /** How long past that the on-device compute may still take before the attempt goes back
+         *  to waiting on the open router; a city reroute finishes well inside it. */
+        const val PHONE_FIRST_ONDEVICE_WAIT_MS = 4_000L
         /** Issue #557: the urgent reroute's one open-router call, connect + read included. FOSSGIS
          *  answers a healthy reroute in 1-3 s; a hung call used to hold the attempt for the shared
          *  client's 12 s call timeout (and 15 s connect, 20 s read) before any fallback was asked. */
@@ -1527,6 +1651,10 @@ class GoogleMapsDataSource @Inject constructor(
         // (its detour is time-competitive with OSRM's ideal → the jam justifies the reroute). Tunable from
         // real side-by-side data — the `directions` diag logs gEta/osrmFF so the threshold can be pinned.
         const val SNAP_ETA_MARGIN = 1.2
+        /** Google's walk is offered only this much shorter than the open router's (issue #478). */
+        const val WALK_GOOGLE_SHORTER = 0.15
+        private const val WALK_GOOGLE_WAIT_MS = 6_000L
+        private const val WALK_NAME_WAIT_MS = 8_000L
         private const val SPUR_TURN_NEAR_M = 150.0
     private const val SNAP_LENGTH_SLACK = 1.05
         private const val SNAP_LENGTH_SLACK_M = 400.0

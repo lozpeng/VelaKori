@@ -18,12 +18,23 @@ interface NeuralSynth {
      *  routes to a system TTS (or stays silent) on a mismatch. */
     val voiceLanguage: String? get() = null
 
+    /** Switch to an INSTALLED voice that speaks [lang] when the selected one does not (the phone's
+     *  language changed mid-session, the Russian voice is installed, the English one is selected):
+     *  true when a voice for [lang] is loaded or loading, false when none is installed. The
+     *  selection pref is untouched; the switch reverts on its own once the guidance is back in the
+     *  selected voice's language. */
+    fun voiceFor(lang: String): Boolean = false
+
     /** Begin loading the model off the main thread (idempotent, cheap to call repeatedly). */
     fun warmUp()
 
     /** Speak [text]; when [interrupt] is true, cancel any in-flight utterance first (imminent turn).
      *  [onDone] runs once audio for this call finishes or is abandoned. */
     fun speak(text: String, interrupt: Boolean, onDone: () -> Unit)
+
+    /** Synthesize [text] ahead of time, quietly, so a later [speak] of exactly this line plays at
+     *  once. Optional: a synth that cannot keep audio ignores it. */
+    fun prepare(text: String, onDone: () -> Unit = {}) { onDone() }
 
     /** Stop any current + queued speech now. */
     fun stop()

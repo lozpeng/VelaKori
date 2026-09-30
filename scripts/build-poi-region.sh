@@ -16,6 +16,7 @@ REPO="${VELA_REPO:-PimpinPumpkin/Vela}"
 TAG="poi-packs"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+source "$ROOT/scripts/bake-lib.sh"
 
 echo "→ downloading $URL"
 curl -fsSL "$URL" -o "$WORK/region.osm.pbf"
@@ -23,23 +24,15 @@ curl -fsSL "$URL" -o "$WORK/region.osm.pbf"
 # bbox first (from the header), so the source PBF can be deleted as soon as it's filtered — a big
 # country needs the disk back. [S,W,N,E] from the declared extract region, NOT data.bbox (same rule
 # as routing graphs — node extent is polluted by outlier nodes). osmium prints (minlon,minlat,...).
-read -r MINLON MINLAT MAXLON MAXLAT < <(osmium fileinfo -g header.boxes "$WORK/region.osm.pbf" | tr -d '()' | tr ',' ' ')
-BBOX="[$MINLAT,$MINLON,$MAXLAT,$MAXLON]"
+BBOX="$(bake_header_bbox "$WORK/region.osm.pbf")"
 
 echo "→ filtering POIs / addresses / named roads"
-osmium tags-filter "$WORK/region.osm.pbf" \
-  nwr/amenity nwr/shop nwr/tourism nwr/leisure nwr/public_transport nwr/boundary=national_park \
-  nwr/addr:housenumber \
-  w/highway=motorway,trunk,primary,secondary,tertiary,unclassified,residential,living_street,service,road,motorway_link,trunk_link,primary_link,secondary_link,tertiary_link \
-  -o "$WORK/filtered.osm.pbf" --overwrite
+bake_pack_filter "$WORK/region.osm.pbf" "$WORK/filtered.osm.pbf"
 rm -f "$WORK/region.osm.pbf" # reclaim disk before the build (country PBFs are GB-scale)
 
-# The export STREAMS into the pack builder — never written to disk. The geojsonseq is ~12x the
-# filtered PBF (a large state: 161 MB -> 1.9 GB), so a country-sized export on disk would blow a
-# 14 GB CI runner; piped, the peak disk is just filtered.pbf + the SQLite db.
+# The export streams into the pack builder (bake_pack_build in bake-lib.sh).
 echo "→ exporting features → building SQLite pack (streamed)"
-osmium export "$WORK/filtered.osm.pbf" -f geojsonseq --add-unique-id=type_id -o - \
-  | python3 "$ROOT/scripts/poipack_build.py" - "$WORK/$ID.db"
+bake_pack_build "$WORK/filtered.osm.pbf" "$WORK/$ID.db"
 rm -f "$WORK/filtered.osm.pbf"
 
 ( cd "$WORK" && zip -q "$WORK/$ID.zip" "$ID.db" )
@@ -49,9 +42,15 @@ COUNTS="$(cat "$WORK/$ID.db.counts.json")"
 UPDATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "→ $ID: ${SIZE} MB, bbox $BBOX"
 
-gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
-  gh release create "$TAG" --repo "$REPO" --prerelease --title "Offline place packs" \
-    --notes "Prebuilt SQLite place/address packs (OpenStreetMap, ODbL) for Vela offline search. Data assets, not a code release."
+# Every GitHub call rides gh_retry: the repository's API budget is shared, and a rate-limited
+# "does the release exist" read as "no" and failed the create (audit 2026-09-29).
+source "$(dirname "$0")/gh-retry.sh"
+ensure_release() {
+  gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 || \
+    gh release create "$TAG" --repo "$REPO" --prerelease --title "Offline place packs" \
+      --notes "Prebuilt SQLite place/address packs (OpenStreetMap, ODbL) for Vela offline search. Data assets, not a code release."
+}
+gh_retry ensure_release
 
 # Revision + delta against the currently published pack, BEFORE the new zip clobbers it. The delta is
 # a small row-level SQLite (poipack_delta.py) the app can apply instead of re-downloading the full
@@ -74,7 +73,7 @@ if [ "$OLD_REV" -gt 0 ] && gh release download "$TAG" --repo "$REPO" -p "$ID.zip
       DSIZE_B=$(stat -f%z "$WORK/$ID.delta.zip" 2>/dev/null || stat -c%s "$WORK/$ID.delta.zip")
       FSIZE_B=$(stat -f%z "$WORK/$ID.zip" 2>/dev/null || stat -c%s "$WORK/$ID.zip")
       if [ "$DSIZE_B" -lt $(( FSIZE_B / 2 )) ]; then
-        gh release upload "$TAG" "$WORK/$ID.delta.zip" --clobber --repo "$REPO"
+        gh_retry gh release upload "$TAG" "$WORK/$ID.delta.zip" --clobber --repo "$REPO"
         DSIZE_MB=$(( ( DSIZE_B + 1048575 ) / 1048576 ))
         DELTA_JSON="$(jq -nc --arg url "https://github.com/$REPO/releases/download/$TAG/$ID.delta.zip" \
           --argjson from "$OLD_REV" --argjson size "$DSIZE_MB" '{fromRev:$from,url:$url,sizeMb:$size}')"
@@ -89,7 +88,7 @@ fi
 INSTALLED_MB=$(du -m "$WORK/$ID.db" | cut -f1)
 rm -f "$WORK/$ID.db"
 
-gh release upload "$TAG" "$WORK/$ID.zip" --clobber --repo "$REPO"
+gh_retry gh release upload "$TAG" "$WORK/$ID.zip" --clobber --repo "$REPO"
 
 ENTRY="$(jq -nc --arg id "$ID" --arg name "$NAME" --arg url "$ASSET_URL" --argjson size "$SIZE" --argjson bbox "$BBOX" \
   --argjson rev "$REV" --arg updated "$UPDATED_AT" --argjson counts "$COUNTS" --argjson delta "$DELTA_JSON" \

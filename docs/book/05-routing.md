@@ -28,6 +28,13 @@ are joined.
   what a region download holds.
 - **Valhalla, for bikes.** The FOSSGIS Valhalla server (`valhalla1.openstreetmap.de`), the OSRM
   servers' sibling, used only for safety-weighted bicycle routes.
+- **The map's own vector tiles, for names.** The OpenMapTiles tiles the map draws (OpenFreeMap, or
+  a downloaded region's basemap file) carry every street's name and shape. `LineNamer` uses them to
+  put names on a line it did not route (below).
+
+**Walking is OpenStreetMap's (2026-09-28).** Walking routes come from the open foot router, not
+Google. Google has no traffic to add on foot and its keyless walking steps are abbreviated. Google
+is asked for its walk once, only to see whether it is much shorter; see "Walking" below.
 
 Transit directions are a different story and deliberately stay with Google; that is
 [chapter 9](09-transit.md).
@@ -82,6 +89,7 @@ it, so a replay says which router drew the line:
 | --- | --- |
 | `OSRM` | the open router's own route, and today also a route snapped along Google's line (see Limits) |
 | `OSRM_VIA_SNAP` | OSRM forced along Google's line: the jam snap (with or without stops, since 2026-09-25) and a Google alternate named on pick |
+| `GOOGLE_LINE_NAMED` | Google's line kept, turns from its bends, names from the map tiles: a much-shorter Google walk, and a picked alternate whose snap was refused |
 | `GOOGLE_ABBREVIATED` | Google's own route with its shortened step list, driven because nothing better answered |
 | `GOOGLE_PROVISIONAL` | a Google alternate in the picker, not named yet |
 | `GOOGLE_NAMED` | the parser's raw tag for a Google route; replaced by one of the two above before it leaves the fetch |
@@ -90,6 +98,42 @@ it, so a replay says which router drew the line:
 
 The on-phone router also takes over in two cases that are not about the network: an avoid with no
 Google answer (see avoids below), and a bike trip in a downloaded area (see bikes below).
+
+### Walking
+
+`walkRoutes` asks the open foot router and, in parallel, Google's walk (6 s cap, skipped for an
+urgent reroute and when traffic-on-tap or Google-free is on). Google's walk joins the list, first,
+only when it is at least 15% shorter (`WALK_GOOGLE_SHORTER`), which is where OpenStreetMap lacks a
+path or a crossing Google knows. Then it is **named, never snapped**: forcing a foot route through
+points on Google's line touches each point on whichever side it lands (the far sidewalk, the far
+carriageway, a flyover deck) and doubles back. Measured on 2026-09-28 against Google's own length:
+a Dhaka walk 4.5 km became 9.9 km, a Davis walk 2.2 km became 2.9 km, and giving each point Google's
+heading did not help. In California the open router's walk matched or beat Google's on every trip
+tried (Davis 2.29 vs 2.21 km and 3.67 vs 3.79 km, Sacramento 3.56 vs 3.61 km), so Google's walk is
+rarely offered there. The Dhaka trip is the case it exists for: 4.6 km named against the open
+router's 5.6 km.
+
+### Naming a line it did not route (`LineNamer`)
+
+Google's line is kept exactly. Turns come from its own bends: the heading change across 32 m either
+side, local peaks of at least 35 degrees, 30 m apart. Each 8 m sample takes the name of the nearest
+street within 25 m (30 m driving) that runs the same way (within 35 degrees); runs shorter than
+40 m are absorbed, since a cross street is picked up for a sample or two at every junction. A turn
+is announced when the name changes across it or it bends 70 degrees or more; a name change with no
+turn is folded into the step before as a rename, as the open router's are. Driving phrases by the
+tiles' road class: joining a motorway or trunk is a ramp, leaving one an exit, a gentle split
+between two a keep. On foot, a road bridge's name (a flyover, marked from the tiles' `transportation`
+bridge segments because the names layer carries no bridge flag) never labels the street under it.
+
+The result carries no lanes and no sign destinations (those sit on the router's junctions, not in
+the tiles), and Google's own step positions are not used: they sit at the start of the stretch
+before a maneuver, a kilometer early on a highway ramp. A line under half named on foot (60%
+driving) is not trusted and the route is dropped. Names cost the few z14 tiles the line crosses,
+fetched in parallel (under a second, often cached) and matched in a few milliseconds.
+
+It serves twice: Google's much-shorter walk, and **driving's fallback when a picked Google
+alternate's snap is refused** (too long, a spur, a sampled point off the road). That fallback used
+to be Google's bare "Turn left, turn right" list.
 
 ### Reroutes run on a deadline
 
@@ -100,6 +144,8 @@ the navigation session's deadline into it so no single stage can eat the whole b
 URGENT_OSRM_TIMEOUT_MS   = 6_000    // the urgent reroute's one open-router call, all in
 URGENT_DEFAULT_BUDGET_MS = 16_000   // an urgent fetch with no deadline passed gets this
 URGENT_GOOGLE_GRACE_MS   = 2_500    // once OSRM has a route, Google gets this long, then trafficless
+PHONE_FIRST_ONLINE_WAIT_MS   = 2_500 // region on the phone: wait this long for OSRM, then take the phone's route
+PHONE_FIRST_ONDEVICE_WAIT_MS = 4_000 // and give the phone's compute this long past it
 LADDER_OSRM_TRY_MS       = 8_000    // the escalated retry's per-try open-router timeout
 LADDER_OSRM_SHARE        = 0.55     // share of its budget the open router may use
 LADDER_SNAP_RESERVE_MS   = 6_000    // room kept for the traffic snap after waiting on Google
@@ -432,8 +478,8 @@ The installed files together must cover both endpoints, or the trip is out of th
 online. One route at a time (the routing context is single-use and serialized on one lock), one
 route per answer, no alternates, no traffic.
 
-Its weakness is **long routes**. The OsmAnd router computes dynamically, with no precomputed
-shortcuts, and past its memory budget it throws rather than slowing down:
+Its weakness was **long routes**. The OsmAnd router's plain search computes dynamically, with no
+precomputed shortcuts, and past its memory budget it throws rather than slowing down:
 
 ```
 MEMORY_MB        = 256    // the app already runs near its largeHeap ceiling
@@ -443,9 +489,40 @@ NATIVE_MEMORY_MB = 64
 Measured on a desktop against a baked Bavaria file with the shipped configuration, car profile:
 4 km in 0.87 s; 57 km in 5.65 s; 151 km fails at 256 MB (4.6 s given 1024 MB); 348 km fails even
 at 1024 MB (41.9 s given 3072 MB). The threshold depends on how dense the road network is, not on
-a fixed distance. The fix is OsmAnd's precomputed hierarchy (HH), which the bake does not generate
-yet. Until it does, offline routing is a city and metro feature, and intercity trips need a
-signal.
+a fixed distance.
+
+**The fix is OsmAnd's highway hierarchy (HH), baked in since 2026-09-29.** The bake precomputes
+shortcuts between the main roads for the car profile and writes them into the region's file
+(about 3.5% more bytes), and the app asks for an HH route on every drive. Measured on
+the North Rhine-Westphalia file at the same 256 MB:
+
+```
+trip                          plain search                 HH
+Aachen -> Bielefeld, 256 km   out of memory after 27 s     0.5 s, 32 MB
+Bonn -> Minden, 255 km        "not enough memory", 29 s    0.4 s
+Cologne -> Munster, 148 km    out of memory after 179 s    0.4 s
+Dusseldorf -> Dortmund, 71 km 90 s                         0.3 s, same route
+```
+
+Avoiding highways needs shortcuts of its own (the default ones run along the highways), so the
+bake writes a second set for it: 3 MB more on North Rhine-Westphalia. Avoiding tolls or ferries
+reuses the default set, with the router filtering it. Cologne to Munster:
+
+```
+avoid                  plain search                       HH
+highways, 161 km       fails past about 30 km             0.6 s
+tolls, 148 km          out of memory (as with no avoid)   0.4 s
+```
+
+Germany has no car tolls, so the toll row only shows the filter costs nothing there; a region full
+of toll roads has not been measured.
+
+The router falls back to the plain search by itself when a file has no HH (a region downloaded
+before the rebake), or when a trip crosses into a second file. So those cases behave exactly as
+before: fine in a city, slow or failing across a dense region. Cycling has its own shortcut set
+(baked since 2026-09-30, about 9% of a region file): Cologne to Essen by bike, 76 km, failed with
+the plain search and takes 0.6 s with it. Walking always uses the plain search, and fails past
+about 28 km in North Rhine-Westphalia.
 
 ### GraphHopper, retired
 
@@ -483,8 +560,9 @@ optimistic on signalized roads.
 - **A start on an on-ramp can snap wrong.** OSRM snaps a start point on a ramp to the surface
   street under it, heading hint or not, so a recheck fetched from a ramp can route the first
   stretch over local streets. Google snaps it correctly, which is why its alternate can lead then.
-- **Offline is metro-scale** until the bake generates HH, and a trip that leaves the installed
-  regions has no offline route at all.
+- **Long offline trips need an HH file**: a region downloaded after the 2026-09-29 rebake, driving,
+  no avoid, both ends in one file. Otherwise the plain search is metro-scale, and a trip that
+  leaves the installed regions has no offline route at all.
 - **No departure-time planning for driving, walking or cycling.** The keyless request has no
   departure field, so "Depart at" and "Arrive by" only move the arrival clock the chooser works
   out (transit alone is refetched for the chosen time, [chapter 9](09-transit.md)); the "usually X

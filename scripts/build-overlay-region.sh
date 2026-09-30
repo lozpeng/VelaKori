@@ -9,7 +9,7 @@
 #   SOURCE=us-legacy (default) — a US STATE from Microsoft US Building Footprints, one .geojson.zip:
 #     scripts/build-overlay-region.sh delaware "Delaware (state)" \
 #       https://minedbuildings.z5.web.core.windows.net/legacy/usbuildings-v2/Delaware.geojson.zip \
-#       "45.54,-124.85,49.00,-116.92"
+#       "38.45,-75.79,39.84,-75.05"
 #   SOURCE=ms-global LOCATION=<Name> [QKPREFIX=<prefix>] — a COUNTRY (or a sub-national CHUNK of one) from
 #     Microsoft's Global ML Building Footprints (quadkey-partitioned GeoJSONL under global-buildings/, listed
 #     in dataset-links.csv). The 3rd arg (URL) is ignored — pass "-"; LOCATION is the dataset's Location column

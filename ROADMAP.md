@@ -20,24 +20,9 @@ opt-in and documented in [`PRIVACY.md`](PRIVACY.md).
 
 Roughly in the order they are worth doing. Each one is small enough for a single PR.
 
-- **Camera detours over every candidate route (issue #600 follow-up, 2026-09-21).** The shipped
-  "Try side streets around cameras" pass only detours the route that LEADS after the camera
-  re-rank, and the two stages can disagree: a route with three cameras on one arterial with a
-  parallel street beside it detours better than the one-camera route whose camera sits on a
-  bridge, but the one-camera route wins the re-rank and the pass never looks at the other. The
-  holistic version runs the cluster/offset pass on every drivable candidate, scores each result
-  by cameras left plus time added, and leads with the best. The cost is the request budget (six
-  per route instead of six in total), so it wants a shared cap or a cheap pre-screen that skips a
-  route whose cameras sit where the geometry offers no parallel road. Whether the two toggles then
-  become one switch is the same decision: today "avoid" costs no requests and "side streets"
-  costs a handful, which is why the second is nested and off.
-- **Reroute on the phone first (deferred 2026-09-16).** When a downloaded region covers the drive,
-  compute the reroute with the on-device engine at once, then swap in the traffic-aware online
-  route when it arrives through the existing heal path. Evidence: a shared diagnostics export
-  (issue #557) shows two urgent reroutes timing out at 20 s while the open router hung, and issue
-  #258 reports the same pattern in cities. Since 2026-09-17 the on-device engine is a bounded
-  FALLBACK inside a reroute; the "phone first, heal later" order is still open, held back because
-  every latch back onto the online route is new bug surface.
+- **Grid cells: the catalog bake (2026-09-28).** The US catalog group is baking; the rest of
+  the world is `grid-cells.yml` `all` with `shard` a and b, four bakes at a time (the releases
+  sort last by construction and the uploads wait out the API hour).
 - **A name index for the downloaded places archive (2026-09-21).** Offline search reads the OSM
   place pack, and OSM is missing whole chains in places (the parts store that started this was
   on the map from the Overture archive and absent from search). The places PMTiles is spatial
@@ -57,9 +42,9 @@ Roughly in the order they are worth doing. Each one is small enough for a single
   it only if people navigate by transit offline; the cached boards are the cheap version.
 - **Google-off, per feature.** The master switch shipped 2026-09-21 (Settings > Privacy > "Use
   Vela without Google"). Still wanted: individual toggles under it, in particular "no Google
-  routing or live traffic" for people who want Google places but not Google directions; a
-  Transitous plan route so transit directions exist with Google off; and free-flow ETAs that say
-  they are free-flow.
+  routing or live traffic" for people who want Google places but not Google directions, and
+  free-flow ETAs that say they are free-flow. (The Transitous plan route shipped 2026-09-28, so
+  transit directions exist with Google off.)
 - **The neural voice's phonemizer is the weak link (2026-09-18, from a drive).** espeak's G2P
   sits in front of the Piper model and reads text that is not prose: "5:49 PM" came out as "five
   foot nine". The workarounds are stacking up (street ordinals spelled out, "I-80" and "CA-99"
@@ -139,8 +124,6 @@ Roughly in the order they are worth doing. Each one is small enough for a single
 - **Japanese offline voice.** Piper has no Japanese phonemizer, so Japanese guidance rides the
   phone's system TTS. A fully offline voice means Kokoro int8 multi-lang (~126 MB, also Chinese),
   which needs the multi-file sherpa plumbing restored and an on-device speed re-check first.
-- **Stability leftover.** The Start-then-launcher quirk: nav keeps running in the foreground
-  service but the activity backgrounds.
 - **Performance pass.** Frame profiling of dense-marker pans and the place sheet in/out churn.
 
 ## On the radar

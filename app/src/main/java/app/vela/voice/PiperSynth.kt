@@ -30,7 +30,7 @@ class PiperSynth @Inject constructor(
 ) : NeuralSynth {
 
     private val worker = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "piper-tts").apply { isDaemon = true }
+        Thread({ android.os.Process.setThreadPriority(SPEAK_PRIORITY); r.run() }, "piper-tts").apply { isDaemon = true }
     }
 
     @Volatile private var tts: OfflineTts? = null
@@ -65,6 +65,17 @@ class PiperSynth @Inject constructor(
      *  prefix. VoiceGuide uses this to avoid reading, say, Russian nav text through the English model. */
     override val voiceLanguage: String?
         get() = (loadedVoiceId ?: VelaPiper.effectiveVoiceId(context))?.substringBefore('_')
+
+    override fun voiceFor(lang: String): Boolean {
+        val selected = VelaPiper.selectedVoiceId(context)
+        val want = if (selected?.substringBefore('_') == lang) null
+            else VelaPiper.installedVoiceIds(context).firstOrNull { it.substringBefore('_') == lang } ?: return false
+        if (VelaPiper.languageOverride != want) {
+            VelaPiper.languageOverride = want
+            reloadVoice()
+        }
+        return true
+    }
 
     /** The user's chosen speaker (persisted PER VOICE — libritts_r's 904 speakers are meaningless for
      *  a single-speaker voice), clamped to the loaded model's range. Only the fleet-default voice seeds
@@ -105,18 +116,19 @@ class PiperSynth @Inject constructor(
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             try { ensureLoaded() } finally {
                 warmingTid = 0
-                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DEFAULT)
+                android.os.Process.setThreadPriority(SPEAK_PRIORITY)
             }
         }
     }
 
     @Volatile private var warmingTid = 0
 
-    /** A prompt is waiting: finish any background warm-up at normal priority. */
+    /** A prompt is waiting: finish any background warm-up at the speaking priority. */
     private fun boostWarm() {
         val tid = warmingTid
-        if (tid != 0) runCatching { android.os.Process.setThreadPriority(tid, android.os.Process.THREAD_PRIORITY_DEFAULT) }
+        if (tid != 0) runCatching { android.os.Process.setThreadPriority(tid, SPEAK_PRIORITY) }
     }
+
 
     private fun ensureLoaded(): OfflineTts? {
         val r = VelaPiper.resolved(context) ?: return null // nothing usable installed
@@ -193,42 +205,21 @@ class PiperSynth @Inject constructor(
         worker.execute {
             val engine = ensureLoaded()
             if (engine == null || myGen != generation) { onDone(); return@execute }
+            // An imminent-turn prompt (interrupt: it cuts whatever is playing) keeps the default
+            // priority so a busy map cannot delay it; the far prompts and the opener yield.
+            runCatching { android.os.Process.setThreadPriority(if (interrupt) android.os.Process.THREAD_PRIORITY_DEFAULT else SPEAK_PRIORITY) }
             try {
                 val t0 = android.os.SystemClock.elapsedRealtime()
                 val sid = speakerId()
                 val spd = speed()
-                // Synthesize each sentence on its own and splice a fixed silence gap between them, so
-                // periods get a real, controllable beat. sherpa-onnx's own `silenceScale` config is a
-                // no-op for this Piper/VITS path (measured on-device: 0.2 vs 1.4 gave identical audio
-                // length), and one-shot generation runs sentences together, so we do the pausing here.
-                // Splitting (which periods are real sentence ends vs. abbreviations) lives in :core so
-                // it's unit-tested — see SpeechText.
-                // Break into phrase fragments (sentences + comma/semicolon clauses), synth each on its
-                // own, and splice the tagged silence after it — a firm beat at periods, a shorter one at
-                // commas (Piper reads straight through commas otherwise, running "In a quarter mile, turn
-                // right" together). The split lives in :core so it's unit-tested (see SpeechText).
-                val frags = SpeechText.speechFragments(text, PAUSE_SEC, CLAUSE_PAUSE_SEC)
-                var sampleRate = 22050
-                val chunks = ArrayList<FloatArray>(frags.size * 2)
-                for ((frag, gapAfter) in frags) {
-                    // Abort paths return WITHOUT calling onDone — the finally below fires it
-                    // exactly once per speak(). The old explicit onDone()+return double-fired
-                    // (then finally again), which double-decremented VoiceGuide's audio-focus
-                    // refcount and un-ducked music over the interrupting prompt.
-                    if (myGen != generation) return@execute
-                    // Every fragment gets TERMINAL PUNCTUATION before synthesis: a bare-ending
-                    // fragment ("turn left") gives the model no final prosody contour, so it trails
-                    // off and swallows the last consonant — the real-drive "lef" instead of "left"
-                    // (user 2026-07-06). The semicolon contour was A/B'd best on this voice (see
-                    // EnNavStrings.arrived, the same finding for the arrival callout). Punctuation
-                    // is language-neutral, so this is safe for every Piper voice.
-                    val fragText = if (frag.lastOrNull()?.isLetterOrDigit() == true) "$frag;" else frag
-                    val a = engine.generate(text = fragText, sid = sid, speed = spd)
-                    sampleRate = a.sampleRate
-                    if (a.samples.isNotEmpty()) chunks.add(a.samples)
-                    if (gapAfter > 0f) chunks.add(FloatArray((sampleRate * gapAfter).toInt())) // spliced silence
-                }
-                val samples = concat(chunks)
+                // Audio [prepare] made ahead of time for exactly this line plays at once: the drive's
+                // opener is prepared while the route preview is up, so Start does not synthesize while
+                // the camera flies in (two synth threads took the 4a's fast cores from the map).
+                val ready = synchronized(prepared) { prepared.remove(preparedKey(text, sid, spd)) }
+                val made = ready ?: synthesize(engine, text, sid, spd) { myGen != generation } ?: return@execute
+                var sampleRate = made.second
+                val samples = made.first
+                val frags = if (ready != null) emptyList() else SpeechText.speechFragments(text, PAUSE_SEC, CLAUSE_PAUSE_SEC)
                 val vol = volume()
                 if (vol != 1.0f) {
                     for (i in samples.indices) samples[i] = (samples[i] * vol).coerceIn(-1f, 1f)
@@ -275,7 +266,7 @@ class PiperSynth @Inject constructor(
                     }
                     if (myGen == generation) Thread.sleep(INTER_PROMPT_GAP_MS)
                 }
-                Log.i(TAG, "spoke ${"%.1f".format(samples.size / sampleRate.toFloat())}s audio (${frags.size} frag.) in ${genMs}ms")
+                Log.i(TAG, "spoke ${"%.1f".format(samples.size / sampleRate.toFloat())}s audio (${if (ready != null) "prepared" else "${frags.size} frag."}) in ${genMs}ms")
             } catch (t: Throwable) {
                 Log.e(TAG, "speak failed: ${t.message}", t)
             } finally {
@@ -283,6 +274,64 @@ class PiperSynth @Inject constructor(
             }
         }
     }
+
+    /** Synthesize [text] the way [speak] voices it: phrase fragments, each with terminal
+     *  punctuation, and a spliced silence after each. Null when [aborted] turns true mid-way. */
+    private fun synthesize(engine: OfflineTts, text: String, sid: Int, spd: Float, aborted: () -> Boolean): Pair<FloatArray, Int>? {
+        // Synthesize each sentence on its own and splice a fixed silence gap between them, so
+        // periods get a real, controllable beat. sherpa-onnx's own `silenceScale` config is a
+        // no-op for this Piper/VITS path (measured on-device: 0.2 vs 1.4 gave identical audio
+        // length), and one-shot generation runs sentences together, so we do the pausing here.
+        // Break into phrase fragments (sentences + comma/semicolon clauses), synth each on its
+        // own, and splice the tagged silence after it: a firm beat at periods, a shorter one at
+        // commas (Piper reads straight through commas otherwise, running "In a quarter mile, turn
+        // right" together). The split lives in :core so it's unit-tested (see SpeechText).
+        val frags = SpeechText.speechFragments(text, PAUSE_SEC, CLAUSE_PAUSE_SEC)
+        var sampleRate = 22050
+        val chunks = ArrayList<FloatArray>(frags.size * 2)
+        for ((frag, gapAfter) in frags) {
+            if (aborted()) return null
+            // Every fragment gets TERMINAL PUNCTUATION before synthesis: a bare-ending fragment
+            // ("turn left") gives the model no final prosody contour, so it trails off and swallows
+            // the last consonant, the real-drive "lef" instead of "left" (user 2026-07-06). The
+            // semicolon contour was A/B'd best on this voice (see EnNavStrings.arrived).
+            val fragText = if (frag.lastOrNull()?.isLetterOrDigit() == true) "$frag;" else frag
+            val a = engine.generate(text = fragText, sid = sid, speed = spd)
+            sampleRate = a.sampleRate
+            if (a.samples.isNotEmpty()) chunks.add(a.samples)
+            if (gapAfter > 0f) chunks.add(FloatArray((sampleRate * gapAfter).toInt())) // spliced silence
+        }
+        return concat(chunks) to sampleRate
+    }
+
+    /** Synthesize [text] now, at background priority, and keep the audio for the next [speak] of
+     *  exactly this line with the same voice and speed (a few lines at most). */
+    override fun prepare(text: String, onDone: () -> Unit) {
+        worker.execute {
+            runCatching { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND) }
+            try {
+                val engine = ensureLoaded() ?: return@execute
+                val sid = speakerId()
+                val spd = speed()
+                val key = preparedKey(text, sid, spd)
+                if (synchronized(prepared) { prepared.containsKey(key) }) return@execute
+                val made = synthesize(engine, text, sid, spd) { false } ?: return@execute
+                synchronized(prepared) {
+                    prepared[key] = made
+                    while (prepared.size > MAX_PREPARED) prepared.remove(prepared.keys.first())
+                }
+                Log.i(TAG, "prepared ${"%.1f".format(made.first.size / made.second.toFloat())}s of audio ahead")
+            } catch (t: Throwable) {
+                Log.w(TAG, "prepare failed: ${t.message}")
+            } finally {
+                runCatching { android.os.Process.setThreadPriority(SPEAK_PRIORITY) }
+                onDone()
+            }
+        }
+    }
+
+    private val prepared = LinkedHashMap<String, Pair<FloatArray, Int>>()
+    private fun preparedKey(text: String, sid: Int, spd: Float) = "$loadedVoiceId|$sid|$spd|$text"
 
     /** Concatenate audio + spliced-silence chunks into one buffer (the gaps are already silence chunks
      *  inserted by the caller). Single chunk → returned as-is. */
@@ -336,6 +385,18 @@ class PiperSynth @Inject constructor(
     }
 
     private companion object {
+        /**
+         * The synthesizer's nice value while it SPEAKS. Measured on a Pixel 4a at a demo drive's
+         * start (2026-09-28, Perfetto): at the default priority the two-thread VITS run took 8.9 s
+         * of CPU in the first 17 s of the drive, more than a core at times, and the map's GL thread
+         * sat runnable-but-waiting 50 to 160 ms of every second while the map ran at 2 to 30 fps.
+         * Nice 8 keeps the thread in the foreground group (BACKGROUND would move it to the
+         * background cgroup, where a prompt could take ten seconds) but lets the render thread and
+         * the tile workers take the core first; a prompt only slows while the map is busy.
+         */
+        const val SPEAK_PRIORITY = android.os.Process.THREAD_PRIORITY_DEFAULT + 8
+        /** Prepared lines kept at once: a drive's opener and its first turns' prompts (up to 7). */
+        const val MAX_PREPARED = 8
         const val TAG = "PiperSynth"
         const val SPEED = 1.0f
         // Silence spliced between sentences (seconds) — a natural period beat for nav prompts.

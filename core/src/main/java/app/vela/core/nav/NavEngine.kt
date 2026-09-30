@@ -477,6 +477,39 @@ object NavEngine {
     }
 
     /** The active language's nav strings (spoken frame + distance + arrival), English by default. */
+    /** The lines [update] speaks for the first [count] turns of [route] when they come up at
+     *  starting speed (the approach bands are then their 400 m / 150 m floors): each turn's far and
+     *  near approach prompts and its turn-now line, in the same wording [update] builds. The voice
+     *  prepares them while the route preview is up, so the first prompts of a drive need no
+     *  synthesis while the camera flies in. A line this misses (a real distance on a short step, a
+     *  higher speed) is simply synthesized when spoken, as before. */
+    fun startPrompts(route: Route, imperial: Boolean, count: Int = 2): List<String> {
+        val ms = route.maneuvers
+        val out = LinkedHashSet<String>()
+        var taken = 0
+        for (i in 1 until ms.size) {
+            if (taken >= count) break
+            val m = ms[i]
+            if (m.type == ManeuverType.ARRIVE) break
+            if ((m.type == ManeuverType.CONTINUE || m.type == ManeuverType.STRAIGHT) &&
+                !app.vela.core.model.continueHasGenuineFork(m.lanes)
+            ) continue
+            taken++
+            val leg = ms[i - 1].distanceMeters
+            val lane = app.vela.core.model.laneGuidance(m.lanes)
+            val full = if (lane != null) nav().useLanesToDo(lane.side, lane.count, nav().spokenSign(m.spokenInstruction()))
+                else nav().spokenSign(m.spokenInstruction())
+            val short = nav().repeatShort(m.spokenInstruction())
+            val far = 400.0
+            val near = 150.0
+            val farSpoken = leg >= far * 0.85 && m.type != ManeuverType.MERGE
+            if (farSpoken) out += nav().inThen(spokenDistance(far, imperial), full)
+            if (leg >= near * 0.85) out += nav().inThen(spokenDistance(near, imperial), if (farSpoken) short else full)
+            out += if (leg >= near * 0.85) short else nav().spokenSign(m.spokenInstruction())
+        }
+        return out.toList()
+    }
+
     private fun nav() = app.vela.core.i18n.NavStringsRegistry.current()
 
     /** A distance phrased for SPEECH, honoring the imperial/metric preference — now localized via the
@@ -508,6 +541,32 @@ object NavEngine {
             val (m, d) = projectAlong(route.polyline, cum, s, from + 0.5, total)
             if (d <= STOP_ON_ROUTE_M) { from = m.coerceAtLeast(from); from } else null
         }
+    }
+
+    /** How many of the stops the drive has passed at [traveledM], counting on from [from] ([marks]
+     *  from [stopMarks], [tolM] the arrival tolerance). A stop with no mark is not on this route: it
+     *  counts as passed only once a LATER stop with a mark is passed, so it never blocks the cues
+     *  after it, and a list with no marks at all (a stops edit or a reroute that could not fit the
+     *  stops, before the next route lands) keeps every stop instead of dropping them all. */
+    fun stopsPassed(marks: List<Double?>, count: Int, from: Int, traveledM: Double, tolM: Double): Int {
+        var i = from
+        while (i < count) {
+            val mark = marks.getOrNull(i) ?: (i + 1 until count).firstNotNullOfOrNull { marks.getOrNull(it) } ?: break
+            if (traveledM >= mark - tolM) i++ else break
+        }
+        return i
+    }
+
+    /** Whether progress JUMPED past the next stop instead of driving to it: from [prevM] to [nowM]
+     *  in one fix, more than [jumpM], with the next stop's mark (a later stop's when it has none)
+     *  inside the jump. The engine adopts a far re-acquire at once when the car sits right on a
+     *  later stretch of the route (a driver who kept going after a stops edit, on the road the
+     *  route uses to come back), and every stop in between then counted as reached and was
+     *  announced without ever being visited. */
+    fun stopSkipped(marks: List<Double?>, count: Int, from: Int, prevM: Double, nowM: Double, tolM: Double, jumpM: Double): Boolean {
+        if (nowM - prevM <= jumpM || from >= count) return false
+        val mark = marks.getOrNull(from) ?: (from + 1 until count).firstNotNullOfOrNull { marks.getOrNull(it) } ?: return false
+        return mark > prevM + tolM && mark <= nowM + tolM
     }
 
     /** The per-route geometry every [update] needs: cumulative meters at each vertex, and each

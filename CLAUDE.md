@@ -215,6 +215,20 @@ Defaults that make the safe path the easy one:
   from the Actions tab once it is on main). Android 8.0's emulator System UI crashes by itself when a
   permission dialog covers the keyguard, so the script grants location up front; its crashes are
   printed as a note, not a failure. First run: both pass on AGP 9.4, Kotlin 2.4 and Cronet 155.
+- **MapScreen ALSO sits at ART's VERIFIER limit, which the debug compile does NOT catch
+  (2026-09-28).** Two extra composable calls at the top of MapScreen compiled clean in debug AND
+  release, and the release APK then died at launch on the 4a (Android 14) with
+  `java.lang.VerifyError: Verifier rejected class ...` on the R8-renamed MapScreen method, while on
+  a Pixel 9 (Android 16) the app came up but MapScreen never composed again after the first frame:
+  every search came back "empty", the deep-link pin sheet stuck, no crash in the log. It went
+  out on canary as 893330ce1 for about two hours. Diagnosis was a bisect of one commit against
+  the phone plus a VelaBisect log line that showed ONE composition. Rules: (1) after ANY change to
+  MapScreen's direct calls, install the release build on a phone and read `adb logcat` for
+  `VerifyError` (or dispatch `old-android-smoke.yml`, which fails on the crash); "no results" on a
+  newer Android is the same bug; (2) new per-screen values that only one child needs are resolved
+  in that child (`isMapDark()` lives in `MapSurface` and `ScaleBarReader`, not MapScreen); (3) the
+  PiP overlay is `BoxScope.PipNavOverlay` since the same day. Both a Compose-side symptom without
+  a crash and the 64 KB rule below are the same budget.
 - **MapScreen is at the JVM 64 KB method limit (2026-09-13).** CI builds release only; the
   DEBUG variant (what the 4a runs) carries Compose source info and failed with "Method too
   large: MapScreenKt.MapScreen" while main built green. Four blocks are split out (same file,
@@ -358,11 +372,22 @@ Defaults that make the safe path the easy one:
   workflow rebuilds everything (hours). This is not hypothetical: the first nightly-prune run
   (2026-07-09) deleted four of the five and broke every offline download; `routing-graphs`
   survived only because the repo has 400+ releases and it sat past the query's `--limit 200`
-  window. TWO standing rules: (1) any automation or cleanup that deletes/edits releases must
+  window. THREE standing rules: (1) any automation or cleanup that deletes/edits releases must
   select by tag pattern `v0.*`, never by "prerelease" or "old" (the infra releases are old
   prereleases by design, to stay off `releases/latest`); (2) any `gh release list` logic must
   assume 400+ releases and paginate or bound by tag - unpaginated list queries caused both the
-  deletion and a wrong damage report.
+  deletion and a wrong damage report (promote-stable and fdroid-repo paginate since 2026-09-28);
+  (3) a data release that is one of MANY (the per-region `cells-<region>` releases) is created
+  with `--target` the root commit, because GitHub sorts releases by the target commit's date and
+  Obtainium reads only the first 100: hundreds of data releases on HEAD would hide every app
+  release from every Obtainium user (SPEC 7.6.5). (4) The Actions token's 1,000 API requests an
+  hour are the WHOLE repository's: a data bake that spends them fails CI's canary and nightly
+  releases and the F-Droid index (it did on 2026-09-29). GitHub calls in a workflow go through
+  `scripts/gh-retry.sh`, and a bake leaves `RATE_RESERVE` (200) for everything else. (5) **Data
+  bakes have NO crons of their own (2026-09-29):** `bake-conductor.yml` (hourly) starts one bake at
+  a time from `tools/bake-schedule.json`, retries only the regions that failed, waits while any heavy
+  bake runs or the API budget is under 400, and never fails its own run. A new bake or cadence is an
+  entry in that file, never a `schedule:` block; a hand dispatch is fine, the conductor waits for it.
 - CI: **stable / nightly / canary channels (2026-08-07, supersedes the per-push nightly).**
   `.github/workflows/ci.yml`: pushes to `main` AND `canary` build + test only (APK as a
   workflow artifact, no release) - a push can never mint a release anymore, which retires the
@@ -458,6 +483,13 @@ Defaults that make the safe path the easy one:
   probe would evict its cache and every install falls back to Noto). Site edits: `site/**` is
   in CI's paths-ignore (no nightly for copy tweaks) and is a push trigger on `fdroid-repo.yml`
   (the deploy still needs release APKs to exist, which they always do).
+  **The DOCS SITE rides it too (2026-09-29): `/Vela/docs/`**, every doc in the repo (FAQ, book,
+  SPEC, FEATURES, roadmap, contributor guides, this file as "Maintainer notes") built with MkDocs
+  Material by `scripts/build-docs-site.py` + `site/mkdocs.yml`, searchable, zero external
+  requests. A NEW DOC FILE IS NOT PUBLISHED until it is added to `PAGES` in the script and to the
+  nav in `site/mkdocs.yml`. Preview locally: `pip install -r site/requirements-docs.txt`, then
+  `python3 scripts/build-docs-site.py --serve` (http://127.0.0.1:8095/Vela/docs/); run with
+  `--strict` before pushing, as CI does. A push to main touching any `.md` redeploys Pages.
   **The APP SIGNING CERTIFICATE is published (issue #294, 2026-08-26):** SHA-256
   `29938b4858063e42e677ff95c901cd48248a7f032a3ae85f9b9e5617568b0d36`, in README ("Check you got
   the real thing") + FDROID.md. Read it out of any signed release with
@@ -1031,7 +1063,13 @@ Defaults that make the safe path the easy one:
   `navStopsForEditor()` (the chooser Place where the coordinates match, else a bare Place from
   the label); Done -> `applyStops` -> `NavSession.setStops(newRemaining, loc)` which `addStop`
   now delegates to: ONE user-ordered replan through the new list, unchanged list = no fetch,
-  and the chooser's `directionsWaypoints` becomes the remaining stops. **Issues #604/#607
+  and the chooser's `directionsWaypoints` becomes the remaining stops. The mid-drive editor's Add
+  stop opens the along-route search (`navSearchOpen`), NOT `beginPickStop`: the search page lives
+  in the non-nav branch of MapScreen's top chrome, so during a drive `pickingStop` hid the editor
+  and stuck until Back (issue #623). A null stop mark no longer counts as passed on the next fix
+  (`NavEngine.stopsPassed`); it emptied the stops list after every edit. A >250 m progress jump
+  past the next stop is a SKIP (`NavEngine.stopSkipped`): the session holds the stops and reroutes,
+  because the engine adopts a far re-acquire at once when the car is ON a later leg. **Issues #604/#607
   (2026-09-25):** `NavStopsRow` is shown on EVERY drive now; with no stops it reads "Edit route /
   Add a stop along the way" (the editor used to be reachable only once a stop existed). With stops
   it adds a "Remove next" button behind a `VelaDialog` confirm (`MapViewModel.removeNextStop` =
@@ -1290,6 +1328,13 @@ Defaults that make the safe path the easy one:
   rotated/tilted or during heading-up nav - never removed, just north-hidden on the browse map.
   Its browse-mode top margin is statusBar + 122dp so it sits BELOW the floating search bar and the
   category chips (8dp under the status bar put it exactly behind the bar - a half-hidden circle, 2026-07-09).
+  **The Layers menu also carries the places source (three radio rows) and the Google-free switch
+  (issue #626, 2026-09-29)**, flipping the same holders as Settings; the places choice only moves
+  the map's pins, search still asks Google unless Google-free is on. `ParkingButton` hides the P
+  button only while no spot is saved. With Google-free on, online search runs Vela's own search
+  (packs + the places archive, downloaded or STREAMED via `PmtilesReader.Archive.http` range reads)
+  and leads with it; category queries skip Photon when Vela answers (Photon has no categories).
+  `NavEndConfirm` (off by default, #624) routes the nav X and Back-during-nav through a VelaDialog.
   **With the LAYERS button enabled the browse margin is statusBar + 200dp instead (2026-07-15):** the
   layers circle owns statusBar+128dp in the same corner and its IconButton touch overflow reaches
   ~190dp, which sat exactly on the compass (user report); 200dp clears the touch target, not just
@@ -1532,7 +1577,9 @@ Defaults that make the safe path the easy one:
   nothing. A first page of `FULL_PHOTO_PAGE_MIN` (40) or more clears it. A missing popular-times
   chart alone is never evidence (many places have none). The mark is stored against
   `SessionRotation.sessionStarted`, and any rotation resets it. Shown as one dim line where the
-  chart would be on a Google place (`place_limited_view`) and a status hint in Settings > Privacy >
+  chart would be on a Google place (`place_limited_view`), under the header of the full reviews page
+  (the same string; the More-reviews stall sets the mark, so it appears there as it happens, which
+  is where #602's reporter was looking), and a status hint in Settings > Privacy >
   Google session (`settings_google_session_limited`). Logcat `VelaSession: limited view: <why>`.
   The earlier note that the photo RPC returns "10 per page whatever COUNT says" was measured while
   this network was limited; it is the limited-view answer, not the RPC's rule. **The limit is per
@@ -1571,6 +1618,30 @@ Defaults that make the safe path the easy one:
   fleet back on the page paths with no release; a per-place cache (photos + feed 6 h, details 15 min)
   makes a re-tap free; "More reviews" follows the feed's next-page token, which sits at payload[1]
   (seen in a full-session reply 2026-09-25: `"<base64>:10"`, payload[5] null, payload[6] `[false]`).
+- **Offline data root (issue #613, 2026-09-28):** a store of downloaded regions takes its folder
+  from `StorageLocation.root(context)` per access (never a `val` computed at construction) and adds
+  the folder to `StorageLocation.FOLDERS`, or a move to the SD card leaves it behind. SPEC 7.1a.
+  Test on a slot-less phone with `adb shell setprop debug.vela.sdtest true` (a `sm set-virtual-disk`
+  card is invisible to apps).
+- **Naming a picked Google route carries the snap's guards (issue #478, 2026-09-28):** `nameRoute`
+  uses `strictVias`, the `SNAP_LENGTH_SLACK` length cap and `spurWithTurn`, like the traffic snap.
+  Without them a sampled point that landed on a flyover deck, the far carriageway or a dead-end lane
+  gave out-and-back spurs and loops (a Dhaka walk named to 10.8 km against Google's 4.5 km); a
+  refused snap falls back to Google's own line with its abbreviated steps.
+- **Link intent filters (issue #614, 2026-09-28):** every host in a filter is matched against every
+  path in it, so `/maps`-prefixed hosts (google.com, www.google.com, goo.gl) and pathless hosts
+  (maps.google.com, maps.app.goo.gl) live in separate filters. Check with
+  `adb shell pm query-activities --brief -a android.intent.action.VIEW -c android.intent.category.BROWSABLE -d <url>`.
+- **Place sheet tabs (2026-09-27):** `PlaceTabs` renders Overview / Reviews / Photos / Updates / Menu under the action pills
+  (Updates with two or more posts; Overview keeps the newest; over three tabs the row scrolls). A bare
+  address or pin (`Place.isListing()` false: no category, rating, count or featured review) gets no
+  Reviews tab, no review scrape, no popular-times space and no limited-view note;
+  the body's info blocks are its `overview` / `overviewTail` slots; `PlaceTabRow` is also drawn pinned
+  over the body (`tabRowY < bodyY`). New place-page content goes in one of those slots.
+- **On-tap privacy options (2026-09-27):** `ReviewsOnTap` (Show reviews button) and `RouteTrafficOnTap`
+  (`RoutingPrefs.googleTraffic`, reset per trip in `routeToSelected`, set by `requestRouteTraffic`), plus
+  `PhotosOnTap` (off) and `DetailsRetry` (on; off = one details request). New place data must keep the
+  sheet still: reserve its space or decide it from the first reply.
 - **Place-content toggles (2026-07-08):** `ShowReviews` / `LoadPhotos` reactive holders
   (`ui/PlaceContent.kt`, same shape as `LiveReviews`, init in VelaApp, rows in Settings → Places).
   They gate BOTH fetch (`fetchReviews`/`fetchPhotos` first line) and render (PlaceSheet `hasReviews`
@@ -1671,6 +1742,10 @@ Defaults that make the safe path the easy one:
   visibility on the basemap `building-3d` fill-extrusion layer (a LaunchedEffect in VelaMapView owns
   visibility; applyLight/applyDark only color it) - extrusion is the fragment-heavy layer, the
   documented 5a-class stutter source at z16+.
+- **The MAP has its own light/dark (2026-09-28, user ask):** `AppTheme.mapMode` (`MapThemeMode`
+  FOLLOW / LIGHT / DARK, Settings > Appearance > Map). `isMapDark()` / `isMapAmoled()` feed the
+  VelaMapView call and the scale bar in MapScreen; everything else keeps `isAppInDarkTheme()`.
+  New map-drawn chrome takes `mapDark`, new sheets and cards take `darkTheme`.
 - **Day/night theme (issue #262, 2026-08-15).** `ThemeMode.AUTO` is light by day and dark after
   sunset, worked out on the device: `:core` `util/SunTimes` is the standard sunrise equation (no
   network, no key, no almanac; unit-tested against published almanac times, plus both polar cases
@@ -1963,9 +2038,15 @@ Defaults that make the safe path the easy one:
   offer during nav renders IN the column too (it used to sit at a fixed 96dp under the turn card),
   and the bottom PSDS tip is gated to the bare map + yields to the resume-nav card - every
   top-of-map card is in the one column; bottom cards (PSDS tip, resume-nav) are bare-map-only.
-  The flash (`MapUiState.status`) shows in ANY map state; the other cards stay gated to the bare
-  map, which INCLUDES during nav - a mid-drive voice/region download or update offer stacks under
-  the faster-route/status cards instead of hiding. `statusVoiceAction` on the state marks a
+  **Heads-up cards dismiss themselves (2026-09-28):** `showStatus` sets `statusAutoMs`
+  (`STATUS_AUTO_MS` 10 s) and `InfoCard` drains the faster-route card's bar over it, frozen while
+  focus is on the card; a card carrying a fix (`voiceAction`) stays; `flashStatus` shows its own
+  duration the same way. The flash (`MapUiState.status`) shows in ANY map state; the DOWNLOAD cards (region, cells, area
+  tiles, voices) show whenever the search page is not open, a place sheet or route chooser
+  included (2026-09-28: an area pick started from a dropped pin ran its 20 MB pull with no card at
+  all); notices and the update offer stay gated to the bare map, which INCLUDES during nav - a
+  mid-drive voice/region download or update offer stacks under the faster-route/status cards
+  instead of hiding. `statusVoiceAction` on the state marks a
   voice-problem flash: `InfoCard` then adds a filled **"Get a voice" pill** (UpdateCard layout)
   that deep-links Settings -> voice library (`MapScreen.onOpenVoiceSettings` -> VelaRoot ->
   `SettingsScreen(openVoiceLibrary = true)`). Both the no-engine warning and the
@@ -2196,7 +2277,7 @@ Defaults that make the safe path the easy one:
   `roadNameLatin` when a route is adopted; the nav tiles add the rest as they load; nav end resets to empty.
   (2) **UI chrome** - 
   all ~330 user-facing `:app` strings live in `res/values/strings.xml` (English) + `res/values-<lang>/` for
-  the 15 translated languages (fr de es it pt nl ru pl sv uk hu iw + zh zh-rTW ja; CJK added 2026-07-11, Hungarian contributed by Zsolt Laszlo Kaiser from the kaiser-app fork and ported 2026-09-13 with its NavStrings table, status words, review words, transit words and the Anna Piper voice, Hebrew 2026-07-13),
+  the 16 translated languages (fr de es it pt pt-rBR nl ru pl sv uk hu iw + zh zh-rTW ja; pt-BR contributed 2026-09-28, picker code "pt-BR" resolved by `Locale.forLanguageTag` like zh-TW, `values-pt` is European; CJK added 2026-07-11, Hungarian contributed by Zsolt Laszlo Kaiser from the kaiser-app fork and ported 2026-09-13 with its NavStrings table, status words, review words, transit words and the Anna Piper voice, Hebrew 2026-07-13),
   referenced via `stringResource`/`getString`. **CJK notes (2026-07-11):** Chinese ships as
   `values-zh` (Simplified, also the fallback for any zh region without its own folder) +
   `values-zh-rTW` (Traditional, Taiwan wording - issue #55); the in-app picker codes are "zh",
@@ -2315,13 +2396,16 @@ Defaults that make the safe path the easy one:
   shot leads the table, the transit shot shows the SCHEDULE BOARD with the ambient
   transit-lines layer toggled OFF for the shot (the purple lines over the map read as ugly; the
   schedules themselves are liked), and Install sits directly UNDER
-  the screenshots. **Full retake 2026-07-16 (supersedes the Pixel 9 browse shots):** all 11
-  shots (incl. the new 11-stop-list.png bus route timeline) shot on the 4a 5G with SystemUI
-  demo mode (clock 1200, battery 100, icons hidden) and sim-location at the Davis fixture
-  spots. **Shoot AFTER 11:30 AM Pacific**: the open/closed badge is decided by Google's
-  servers at request time, so a spoofed clock can't make a closed Mikuni read "Open" - the
-  demo clock only needs to AGREE with real time (noon clock, midday shoot, arrival times and
-  departure boards all stay coherent). Camera counts on the route picker need Avoid
+  the screenshots. **Full retake 2026-09-28 (the same 11 spots as 2026-07-16, new UI):** shot on
+  the 4a 5G with SystemUI demo mode (clock 1200, battery 100, icons hidden), sim-location
+  downtown Davis, road label on its default placement, and the SCREENSHOT CLOCK DIAL
+  `adb shell setprop debug.vela.tune.demoClock 720` (`ui/DemoClock`, SPEC 3): it recomputes the
+  open/closed line from the place's hours at noon, counts the arrival clock from noon, and fetches
+  transit boards and itineraries for the next noon, so the set can be shot at any hour. Clear it
+  after (`setprop debug.vela.tune.demoClock ''`). The transit shot is framed by expanding and
+  collapsing the first itinerary (the fit stays); the stop list is the A line from Memorial Union
+  and the K line from Powell. The nav shot is taken with "Road ahead bar" and "Prefer buttons over
+  swipes" OFF (their defaults; the 4a keeps both on for testing, so switch them off and back). Camera counts on the route picker need Avoid
   surveillance cameras ON for the shot (restore OFF after). The site (site/assets/*.webp)
   carries the same shots at 720px q82. Site assets are ALL bundled locally (no hotlinks -
   the page makes zero external requests): the Obtainium/F-Droid badges are committed copies
@@ -2808,6 +2892,18 @@ architecture note.
   `OfflineCategoryKeywordsTest` lists every chip query; add yours there. Bars is dropped from
   `all()` while `HideAdult` is on (the filter would empty it), and reading `HideAdult.on` there
   keeps the rows reactive.
+- **Route chooser MINIMIZED state (issue #616, 2026-09-28):** `GoogleStyleDirectionsPanel` has a
+  third level below the summary: one line with the time, distance and Start. Handle tap: list ->
+  summary, summary <-> minimized; a swipe down from the summary (40 dp or a fling) minimizes, a swipe
+  up restores; a map pan (`minimizeTick`) minimizes. Small screens had no way to see the route.
+- **Small fixes 2026-09-28:** the in-bar road name row grows to its text instead of a fixed 20 dp
+  that cut descenders (#617); list/saved pins draw at `SAVED_PIN_SCALE` (1.35, measured against the Davis icons: 1.25 still read smaller) x the icon-size
+  setting so they match POI icons (#618); the three water label layers joined `PLACE_LABEL_LAYERS`
+  (#619).
+- **Transit under the Google-style picker (2026-09-29):** the classic `DirectionsPanel` body with
+  the picker's header (`googleHeader`), rendered from `ClassicDirectionsHost` (split out of
+  MapScreen for the verifier limit). Route chips "Fewer transfers"/"Less walking" send `!4e2`/`!4e3`
+  (SPEC 8); cards show `trip[13]` frequency.
 - **Google-style route picker - the DEFAULT since 2026-09-18 (`ui/RoutePicker`, pref
   `route_picker_google`, Settings > Navigation).** It shipped as an experiment
   (`ui/Experiments`, `exp_google_chooser`, Settings > Diagnostics) and graduated once it had been
@@ -2831,6 +2927,10 @@ architecture note.
   `navRemainingStopLabels()` while driving or `directionsWaypoints` in the chooser. Via boundaries
   carry no DEPART/ARRIVE maneuvers (routeVia and chainOnDevice both drop them), so without this
   row a stop was invisible in the list.
+- **Launch camera (2026-09-28, discussion #365):** the MapView opens at the seed (deep-link target or
+  last known / simulated fix) at z15.5 via `MapLibreMapOptions.camera`, and the free-drive follow
+  JUMPS when its target is over `FOLLOW_JUMP_M` (1 km) away instead of easing: from the world
+  default, or across a stale seed to a fresh fix, the ease dragged the map through every tile.
 - **Free-drive follow engages ONCE per session (2026-09-16).** The cold-engage branch flies to the
   fix at z15.5 when the camera sits below z14. A pinch releases the camera (`browseCam` -> NaN) and
   the next frame re-seeds, so pinching out past z14 while still following flew you straight back in,
@@ -3139,7 +3239,7 @@ architecture note.
   + tile hashes, phone-computable - Android has no blake2b) must equal the one the patch carries,
   which is a fresh download's; a mismatch truncates back and the caller downloads whole. Policy is
   `ui/RegionUpdates` (pref `region_update_mode`; since 2026-09-22 WIFI/MOBILE also run
-  `MapViewModel.scheduleAutoRegionPatches`: a minute after start, at most once per 20 h, every
+  `MapViewModel.maybeAutoPatch`: a minute after start, every 3 h, and on a validated network, at most once per 20 h after a manifest read, every
   installed places/basemap archive and place pack with a patch FROM its installed rev takes it,
   never a full download; Update's full download is `download(replace = true)` over the installed
   copy instead of delete-then-download. WIFI **is the default since 2026-09-25** (it was OFF
@@ -3180,7 +3280,7 @@ architecture note.
   `id`, NOT in properties), tile `origin` = `osm`. WHY: Overture is monthly and uncorrectable by us,
   OSM is the one source a user can fix and see fixed. Nodes only (a way's centroid is the parcel-point
   guess again). Andorra: 766 in box, 521 added, 245 deduped. A seventh of the catalog rebakes nightly
-  (cron 04:40, `NIGHTLY` slice by sorted position) so an edit lands within a week; `only=<region>` is
+  (the bake conductor's daily `places-slice` job, `slice` input = UTC weekday) so an edit lands within a week; `only=<region>` is
   ~2 minutes. Deliberately NOT the whole catalog nightly: it would offer every downloaded region a
   fresh few-hundred-MB copy every day.
 - **THE BAKE TOOLCHAIN IS CACHED + PINNED (2026-09-18):** tippecanoe 2.79.0 and go-pmtiles 1.31.2
@@ -3197,6 +3297,12 @@ architecture note.
   (`BBOXPRED`, S3 path only) returns the identical 400,608 Kentucky rows in 3.7 s. The addresses
   query in the same script always did this. KEEP the geometry test as the exact filter; bbox is the
   hint. Any new read of a cloud parquet gets the same treatment before anyone optimizes the rules.
+- **OVERTURE TAXONOMY (2026-09-27).** Release 2026-09-23.0 replaced `categories` with `taxonomy`
+  and renamed about a third of the values. `build-places-region.sh` reads whichever column the
+  release has and maps new names back through `tools/overture-taxonomy-map.csv` (new,old; built by
+  joining ids across 2026-08-19.0 and 2026-09-23.1 over 19 sample boxes, majority old name per new
+  one), so every rule keeps its old names. A new rule names the OLD category. `duckdb -bail`: a
+  failed statement fails the bake instead of exiting 0 with no archive.
 - **Bake joins must be HASH joins (2026-09-16).** Two correlated lookups that were free on the
   Davis box went effectively quadratic over a whole state: the tenant check (one EXISTS with three
   OR-ed tests) and the unit snap (a LATERAL lookup per stacked row). A world bake did 19 regions in
@@ -3224,14 +3330,22 @@ architecture note.
   over the congestion colors). Satellite still anchors above the imagery. Keep it under the labels.
 - **SIDE-STREET DETOURS AROUND PLATE CAMERAS (issue #600, 2026-09-21).** `ui/FlockDetour` (pref
   `flock_detour`, OFF, Settings > Navigation > Cameras, nested under "Avoid surveillance cameras",
-  in the settings search). After `refreshFlockOnRoute`'s re-rank, when the leading route still
-  passes cameras, `tryCameraDetour` runs the reporter's workaround: `core/nav/CameraDetour.candidates`
-  groups the lead route's cameras into clusters (`CameraAlerts.group`, nearest first, at most
-  `MAX_CLUSTERS` 3) and for each gives the two points `OFFSET_M` (150 m) to the driver's left and
-  right of the road there; the pass tries left then right through `dataSource.directions(waypoints=)`
-  with the point merged into the user's stops in travel order (`CameraDetour.mergePlan`), keeps a
-  candidate whose camera count drops inside the SAME cap as the re-rank (the lesser of 25% or 10 min
-  over the fastest route), builds the next cluster on it, and stops at `MAX_REQUESTS` (6). The
+  in the settings search). After `refreshFlockOnRoute`'s re-rank, `tryCameraDetour` runs the
+  reporter's workaround over EVERY route that still passes cameras (since 2026-09-28; it used to
+  detour only the leader, and the two stages disagreed: three cameras on an arterial with a parallel
+  street beside it detour to zero while a one-camera route with its camera on a bridge wins the
+  re-rank): `core/nav/CameraDetour.candidates` groups a route's cameras into clusters
+  (`CameraAlerts.group`, nearest first, at most `MAX_CLUSTERS` 3) and for each gives the two points
+  `OFFSET_M` (150 m) to the driver's left and right of the road there; the pass tries left then right
+  through `dataSource.directions(waypoints=)` with the point merged into the user's stops in travel
+  order (`CameraDetour.mergePlan`), keeps a candidate whose camera count drops inside the SAME cap as
+  the re-rank (the lesser of 25% or 10 min over the fastest route), and builds the next cluster on
+  it. ONE budget for the trip: `MAX_REQUESTS` (6) across all routes, at most `MAX_REQUESTS_PER_ROUTE`
+  (4) on one, routes taken in list order (the leader first), and a cluster within `SAME_CLUSTER_M`
+  (60 m) of one already tried from another route is skipped (`CameraDetour.untried`: routes share
+  arterials, and the same corner gets the same side streets). The leader and every result then go
+  through `CameraDetour.choose` (fewest cameras, ties to the faster, must beat the leader inside the
+  cap; the same function the re-rank uses, so the two stages cannot disagree). The
   router's own snap does the graph work: a point that lands on the same road folds back into the
   same route and fails the count; a point on a parallel street is a real detour. The kept route
   leads the list with its badge, carries `Route.detourPlan` (the full ordered waypoint list), and
@@ -3240,12 +3354,46 @@ architecture note.
   `remainingStops()` so the stops row, the editor and the leg dividers never show them). A mid-drive
   stops EDIT keeps the detour too (`NavSession.withSilentVias` re-inserts the silent points still
   ahead in route order around the edited list), and so does `addStop`.
-  Logcat `VelaFlockRoute`: `detour: clusters=N requests=N kept=… cameras A -> B`. It depends on the
+  Logcat `VelaFlockRoute`: `detour: clusters=N requests=N (K left) kept=… cameras A -> B` per route,
+  then `detour pick: …`. It depends on the
   same-day waypoint work: Google prices every candidate through its stops with traffic, so the cap
   compare is honest. DRIVE only, and epoch-guarded like the re-rank.
 - **Flock route counts use a 45 m corridor (2026-09-16, #527, `FlockCameras.along` default):** 120 m
   caught cameras on a parallel alternate a block over. `OverpassAlprCameras.fetchAlong` (the
   fallback) still uses its own width; the bundled set is what counts in practice.
+- **NAV START WAS 2 TO 30 FPS FOR 15 SECONDS (2026-09-28, user: "jittery when just starting out",
+  a demo route, so not GPS).** SPEC 4.7a has the trace. The voice was the surprise: Piper synthesizes
+  the opener and the first prompts on two threads at default priority, 8.9 s of CPU in the first
+  17 s on a 4a, and the map's GL thread waited for a core; it speaks at nice 8 now
+  (`SPEAK_PRIORITY`, not BACKGROUND: the background cgroup would delay a prompt by seconds), and an
+  imminent-turn prompt (`interrupt = true`) keeps the default priority; nothing is dropped, a far
+  prompt can only start a little later under load. Plus:
+  no details page or review page for the sheet's place while navigating (a WebView boot on the
+  main thread, 757 ms), and the road-features file is parsed while the chooser is up. Left: the
+  fly-in's tile burst (four workers saturated for ~4 s) and the nav chrome's first measure. Drive
+  mode before/after, fps per second from Start: 2/26/7/27/34/19/21/36/53 vs 0/19/39/41/48/50/56/58,
+  BUT repeated alternating runs put the two builds about level, so treat the voice/WebView fixes as
+  CPU and heat savings, not the jitter fix. The bisect (SPEC 4.7a) says the seconds-3-to-8 dips are
+  the combined placement of Vela's own symbol layers during the fly-in; deferring the declutter
+  and slowing the zoom only moved the work later (measured, reverted). Hiding the `vela-`
+  symbol layers until the fly-in settles and revealing once was measured too (2 fps, noise) and
+  not kept; what is left is fewer symbol layers at the nav zoom. **2026-09-29: the lever was the
+  open PLACES layers** (bisect: hiding them alone lifted seconds 4 to 6 from ~8 to 29-50 fps). They
+  stay hidden for the first 7 s of a DRIVE (`placesNavHold`, `NAV_PLACES_HOLD_MS`) and appear at the
+  settled nav zoom; one-way arrows joined the drive declutter. SPEC 4.7a has the A/B.
+  **2026-09-30: a one-tap Start from the place sheet was the bad case** (5-7 fps in seconds 3-4):
+  no layer mattered; `top -H` showed the route's follow-up work (road-features pass, camera jobs)
+  and two `piper-tts` threads on the fast cores during the fly-in. The auto-start now waits for the
+  follow-up work (`awaitRouteWork`, cap 3 s): 21-33 fps. The opener is synthesized during the route
+  preview (`NavSession.prepareStart`: opener + `NavEngine.startPrompts`, `PiperSynth.prepare`).
+  Tried and reverted (no gain, SPEC 4.7a fifth round): tile workers at background priority,
+  skipping the overview fit on the one-tap path, waiting for voice prep or map idle there. Count
+  fps FROM the nav service start (`navrun2`-style logcat alignment): before it the map may be idle,
+  and a low count then is not jank. GrapheneOS refuses simpleperf even for
+  a profileable build (perf_event denied), so `top -H -o TID,%CPU,CMD` is the thread-level tool.
+  Measure with `debug.vela.fps` + Perfetto on the 4a; the P9's GrapheneOS gives no ftrace to a
+  shell trace, and a demo route there uses the phone's STICKY travel mode (a walking demo buzzes
+  the walk turn cues).
 - **A PARKED DRIVE DRAWS NOTHING (2026-09-25, a "device runs very hot" report).** The nav
   ticker re-uploaded the location dot's GeoJSON every frame before the arrow engaged (a parked car
   never engages) and called `moveCamera` every frame after, so a route left up while stationary
@@ -3253,7 +3401,16 @@ architecture note.
   when it moved; the follow camera is written only past sub-centimeter/sub-degree tolerances;
   after 60 idle frames with the puck under 0.3 m/s the loop waits `NAV_IDLE_TICK_MS` (120 ms)
   between checks. Measured: 0 map frames and ~15% CPU parked, 59 fps unchanged on a demo drive.
-  Any new per-frame write in the ticker must be change-gated too, or this comes back. Same day:
+  Any new per-frame write in the ticker must be change-gated too, or this comes back.
+  **THE SAME BUG LIVED IN THE FREE-DRIVE FOLLOW LOOP ON THE BARE MAP (2026-09-29):** its
+  `withFrameNanos` loop ran every frame as long as follow was on (the default), moving or not.
+  Perfetto on the 4a, idle bare map: ~59 animation frames a second, ~9% of a core on the main
+  thread, zero frames drawn. It now waits `BROWSE_IDLE_TICK_MS` (200 ms) between checks after
+  `BROWSE_IDLE_FRAMES` (30) frames that move nothing: idle CPU 9% -> 0.2%, and the first frame
+  that moves anything (a fix, the compass, a locate tap's zoom, a flight) goes back to frame rate.
+  The tunnel dead-reckoning loop (1 s) and the drive-stats loop (30 s) now sleep until a drive
+  starts instead of waking for the life of the view model. A `withFrameNanos` loop needs an idle
+  exit; check with a Perfetto trace of the idle app (`Recomposer:animation` slices per second). Same day:
   a "continue"/"turn" step with the `uturn` modifier read "Bear uturn onto X"; `osrmPhrase` now
   phrases any uturn modifier as the language's U-turn line (`OsrmRouterTest`).
 - **OFFLINE ADDRESSES GET THEIR CITY, STATE AND ZIP FROM THE NEIGHBORS (2026-09-23, user report).**
@@ -3597,6 +3754,10 @@ architecture note.
   - AND Liberty's own `landuse_pitch`/`landuse_track` layers (they sit ABOVE the twin) are
   colored directly + exempted from the landuse-neutralize loops, else the tint never showed
   (found at a park with ball courts).
+  AIRPORTS: Liberty's `aeroway_fill` / `aeroway_runway` / `aeroway_taxiway` carry light-map
+  colors and no pass reached them until 2026-09-28, so every airport drew as a pale block on the
+  dark map; all three dark palettes theme them now (SPEC 6.2). A Liberty layer the palette fns do
+  not name keeps its light default in dark mode: check new ones.
   Trail light = #7fcdb0 (P9-SAMPLED); pitch light = #a9eac2 (P9-SAMPLED at Toomey Field,
   no estimates left); campuses (landuse_school) = #f0eded warm gray (sampled at UC Davis,
   light only - dark keeps the neutralized land).
@@ -3740,8 +3901,14 @@ architecture note.
   releases); (2) merge so `fdroid-repo.yml` carries the unpack-to-Pages step; (3) an
   fdroid-repo.yml run deploys the site. Then MapFonts' probe starts passing and Roboto
   lights up on next app launch, no app release needed.
-- **Two-finger tilt: shove detector widened** (maxShoveAngle 55, pixelDeltaThreshold 8) - the
-  stock 20-degree parallel requirement made tilt nearly impossible. **Photo viewer:**
+- **Two-finger tilt: shove detector widened** (maxShoveAngle 55) - the stock 20-degree level
+  requirement made tilt nearly impossible. The start threshold went to 8 px with it, and that
+  made pinches tilt (issue #627): shove starts once the fingers' midpoint has moved that far
+  vertically (it never checks whether the fingers are spreading), zoom starts after 7 dp of span
+  change, and MapLibre makes shove and scale mutually exclusive, so the first to start owns the
+  gesture; 8 px is about 3 dp, less than the wobble of a second finger landing. It is 20 dp now
+  (stock is 16 dp), and Settings > Map "Tilt with two fingers" (`MapTilt`, default on) turns the
+  gesture off. **Photo viewer:**
   double-tap zooms 2.5x at the tap point / back out (a tap-detector pointerInput layered
   before the custom pinch/dismiss loop, which never consumes bare taps).
 - **"Also at this location" is ALIVE (`placesHere`/`othersAt`)** - it fills only when the
@@ -4204,7 +4371,15 @@ Gotchas:
   structured child would hold the scope until its blocking HTTP call returned) and past the grace
   the route goes out trafficless, which the recheck's trafficUpgrade heals. Both the
   single-destination and the multi-stop branch do this.
-  **A REROUTE CARRIES ITS DEADLINE INTO THE FETCH (issues #557 / #258, 2026-09-17).** A shared
+  **PHONE FIRST (2026-09-28):** an urgent fetch over a trip a downloaded region covers
+  (`RouteEngine.covers`, the trip-box test, `ObfRouteEngine.tripCandidates` unit-tested) starts the
+  obf route in parallel and adopts it when the open router is not back inside
+  `PHONE_FIRST_ONLINE_WAIT_MS` (2.5 s; the compute gets `PHONE_FIRST_ONDEVICE_WAIT_MS` 4 s more,
+  inside the budget); it is trafficless, so the 20 s degraded recheck heals it (same course) or offers
+  the online course. Diag line `urgent: phone first, on-device route after N ms ...`. Both the
+  single-destination and the multi-stop branch. The latch back onto the online route is the EXISTING
+  heal and faster-route paths, nothing new.
+    **A REROUTE CARRIES ITS DEADLINE INTO THE FETCH (issues #557 / #258, 2026-09-17).** A shared
   diagnostics export (drive, cellular, validated link) had two urgent attempts end in
   "reroute FAILED" at exactly 20 s each with no DRIVE line and no "google not back" line (so the
   car open router never answered, while a WALK fetch to the same host answered in the same
@@ -4493,8 +4668,10 @@ Gotchas:
   `navPuckBitmap()`. Per-frame writes go to `mutableFloatStateOf` holders read in the DRAW phase,
   so no recomposition per frame. `ME_ARROW_LAYER` is hidden while the overlay is on and restored
   (via `lastMeLayerKey = null`) when following stops, the puck disengages or the style reloads.
-  After: chevron motion 0.07 px/frame, 2% of frames >0.5 px (was 1.39 px, 91%). The GeoJSON
-  puck is still used when not following (panned map) and in browse. Rule: anything that must
+  After: chevron motion 0.07 px/frame, 2% of frames >0.5 px (was 1.39 px, 91%). Since 2026-09-29
+  the overlay stays on while DETACHED too (pan, rotate, pinch, overview), projected through the
+  live camera (user: the UFO went flat and jittery on any rotate); the GeoJSON puck is used only
+  before the puck engages and in browse. Rule: anything that must
   sit still on screen while the map moves cannot be a per-frame GeoJSON symbol.
   **THE TEXTUREVIEW CRASH SENTINEL MISFIRED ON A HEALTHY PHONE (2026-09-03).** `texture_render`
   (compatibility rendering, a TextureView map) is meant for GL drivers that kill the process at
@@ -4810,6 +4987,12 @@ Gotchas:
   acquire on `ERROR`; and a failed system-TTS `onInit` used to queue every prompt into `pending` forever
   (unbounded, replayed stale on a later init) - it now clears `pending`, latches `systemInitFailed`, and
   fires `langUnavailable` instead of queueing into a void.
+  **The guide switches to an INSTALLED voice of the guidance language by itself (2026-09-28):**
+  `NeuralSynth.voiceFor(lang)` (PiperSynth: an installed id with that language prefix goes into
+  `VelaPiper.languageOverride`, `reloadVoice`; cleared when the selection's language is back), so a
+  phone switched to Russian mid-session with Irina installed speaks Russian without a Settings
+  visit; the language hint's pill now DOWNLOADS the language's recommended voice
+  (`statusVoiceDownloadId`, "Download Irina (67 MB)") instead of opening the library.
   **A Piper voice is a SINGLE-language model** - reading another language's nav text through it is
   gibberish (the "English voice read Russian after a language override" bug). `NeuralSynth.voiceLanguage`
   exposes the loaded voice's lang (id prefix, `en_US-hfc_female` → "en"); `VoiceGuide.speakNow` compares it
@@ -5021,10 +5204,40 @@ Gotchas:
   `installedRev`/`updatable(manifest)`. `MapViewModel.refreshRegionUpdates` (runs with the catalog
   refresh) fills `MapUiState.regionUpdates` (region id -> "routing"/"places"/"map") and the Offline maps
   row shows the same "Update" it showed for a newer pack; `updateRegion` refreshes the pack (delta
-  when offered), every places and basemap archive inside the region, then the obf. Crons: places on the
-  6th (shard a) and 7th (shard b) against the newest Overture release found in the bucket listing;
-  basemap on the 9th and 10th (first/second half of the catalog by id). The obf bake stays manual (its
+  when offered), every places and basemap archive inside the region, then the obf. Rebakes are the bake conductor's
+  (places against the newest Overture release found in the bucket listing, basemap in two halves by
+  id, both every 30 days; see the releases rule (5)). The obf bake stays manual (its
   runner memory limits and the user's manifest flip).
+- **Grid cells, app side (2026-09-28, SPEC 7.6.5).** `app/offline/CellStore` (manifest from
+  `BuildConfig.CELLS_MANIFEST_URL`, `-PcellsManifestUrl`; `cells/index.json`) streams a cell zip
+  and installs each part through `ObfStore.installFile` / `PoiPackStore.installFile` /
+  `PmtilesRegionStore.installFile` under the cell's id, so nothing downstream knows about cells.
+  `AreaPlan.cells`/`cellsMb` feed the picker's cells checkbox (default, excludes the region one);
+  `downloadCells` runs under the region card with `routingDownloadingId = CELLS_DOWNLOAD_ID`;
+  `deleteCellRegion` and `deleteRoutingGraph` remove them; delete-all sweeps `cells/`; a whole
+  region download that completes deletes the region's cells (duplicate pack rows otherwise). Test
+  with the published Delaware cells (`cells-manifest.json` on `grid-cells`). **The places layer
+  mounts every installed archive touching the view since the same day** (`sourcesFor(center,
+  manifest, view)`, nested archives dropped, `MAX_MOUNTED` 8, oldest rev wins the one-set gate);
+  it used to mount one, and a view over a cell edge showed one cell. Per-cell updates since the
+  same day: `newerCells` (installed rev vs manifest rev) feeds `MapUiState.cellUpdates`, the row's
+  Update and `maybeAutoPatch` re-pull the whole zip.
+  **Cells releases are created on the ROOT COMMIT (`CELLS_RELEASE_TARGET`, bake-lib.sh):** GitHub
+  sorts releases by the target commit's date, Obtainium reads only the first 100 releases, so 450
+  cells releases on HEAD would have hidden every app release from it; on the root commit they sort
+  last (checked with a throwaway release). promote-stable and fdroid-repo paginate now too.
+- **Grid cells, bake (2026-09-27, SPEC 7.6).** `scripts/build-cells-region.sh <region>
+  [local.pbf]` cuts a catalog region into 0.5 degree cells (doubled until the region fits the 999
+  assets one release holds; Alaska needed it) and zips obf + place pack + places slice
+  per cell; `CELLS_UPLOAD=1` publishes to `cells-<region>`, `scripts/merge-cells-manifest.sh`
+  derives `cells-manifest.json` on `grid-cells` (`DRY_RUN=1` for a local copy);
+  `grid-cells.yml` is dispatch only, four bakes at a time: the repo's Actions token has 1,000 API
+  requests an hour for every job together, and the first US wave at eight lost five finished
+  states to HTTP 403 on upload; uploads go 100 per call and wait for the reset when exhausted.
+  Shared bake steps live in `scripts/bake-lib.sh`
+  (build-obf-region.sh and build-poi-region.sh source it).
+  Cross-cell routing check: `ObfCellsProbeTest -DvelaCells=<dir with cells/ and whole/>`.
+  Local runs: macOS bash is 3.2, keep the scripts 3.2-safe.
 - **Offline basemap (2026-09-14).** A region download is now routing (obf) + places (Overture) + the
   MAP PICTURE: `tools/build-basemap-region.sh` (planetiler over the same Geofabrik extract the obf
   bake uses, OpenMapTiles schema = what OpenFreeMap serves, so the same Liberty style draws it) ->
@@ -5137,8 +5350,8 @@ Gotchas:
   Brazil/India/Japan/Indonesia zones, countries) plus davis: finer pieces than the live routing catalog's
   whole countries, so `downloadPlacesForRegion` pulls EVERY archive whose box center falls inside the
   downloaded region (a whole-country download today gets all its pieces, a Land download later gets one),
-  and `sourcesFor` streams the smallest covering piece. The full bake is `places-overlays.yml` on its monthly crons (6th shard a, 7th shard b; the
-  matrix caps at 256 jobs) plus the nightly seventh at 04:40, max-parallel 8; `MapPoiPrefs.placesSource` (Settings > Data & privacy since
+  and `sourcesFor` streams the smallest covering piece. The full bake is `places-overlays.yml` (the bake conductor runs the daily seventh; a full
+  rebake is a `shard` a/b dispatch, the matrix caps at 256 jobs), max-parallel 8; `MapPoiPrefs.placesSource` (Settings > Data & privacy since
   2026-09-16, was Map; "Places come from": `open` ("Vela data", compiled default) / `google` / `both`; the FLEET DEFAULT
   is remote since 2026-09-16 (`calibration.json` `defaultPlacesSource`, v20 -> `Calibration.defaultPlacesSource`
   -> the VM pushes it into `MapPoiPrefs.setRemoteDefault` at init + after refresh, same channel as
@@ -5399,6 +5612,15 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   reviews, not routing. **`OSRM_BASE` is the FOSSGIS community server (fair-use) - point at a
   self-hosted OSRM/Valhalla before any real release.** (This retired the keyless-step parsing as the
   primary path + the Nominatim "fill the missing road name" hack.)
+- **Walking is OSM's; Google's line is NAMED, never snapped (issue #478, 2026-09-28).**
+  `googleDirections` returns empty for WALK except to `walkRoutes`, which offers Google's walk only
+  when 15% shorter and names it with `LineNamer`; the chooser hides the traffic row for walking.
+  `LineNamer` also replaces Google's abbreviated steps as `nameRoute`'s fallback. Three rules found
+  building it: Google's keyless step POSITIONS are useless for placement (the start of the stretch
+  before the maneuver); `transportation_name` has no bridge flag, so flyovers are marked from the
+  `transportation` layer's bridge segments, or a walk under a flyover is named after the deck; and
+  Dhaka lanes are often unnamed (59% named), hence the 50% bar on foot. Tile fixtures for the tests
+  are in `core/src/test/resources/tiles/`. SPEC 4.x.
 - **Bike routing is SAFETY-weighted by default (issue #401, 2026-09-14).** `directions()` takes an
   early branch for `TravelMode.BICYCLE` when `RoutingPrefs.bikeSafe` (core holder, mirrored from
   the `app.vela.ui.BikeSafe` pref `bike_safe`, Settings > Navigation, default ON): the on-device
@@ -5498,6 +5720,20 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   `.github/workflows/obf-regions.yml` (matrix clone; the MapCreator tool is pinned on the
   `obf-tools` release); assets are RAW .obf (already deflate-compressed inside; download size ==
   installed size).
+  **HH SHIPPED (2026-09-29): the obf bake writes OsmAnd's highway hierarchy into every region file
+  (`bake_obf_hh`, bake-lib.sh) and `ObfRouteEngine` turns it on for every DRIVE and BICYCLE route.**
+  A bicycle set too since 2026-09-30 (best effort, ~9% of the file; `VELA_OBF_HH_BIKE=0` skips). Two car shortcut
+  sets, default and avoid_motorway (`--routing_params=---avoid_motorway`); tolls and ferries filter
+  the default set. Avoiding highways failed past ~30 km in NRW without its set. NRW at
+  256 MB: 256 km out of memory -> 0.5 s; 71 km 90 s -> 0.3 s (SPEC 4.5). Three traps found building
+  it: `hh-routing-shortcuts` takes the OBF as its first argument, not the .hhdb (a protobuf
+  "invalid tag (zero)" otherwise); both MapCreator HH steps name their output after the CURRENT
+  FOLDER (`hh_car.hhdb`, `hh_car.obf`), so they run in a scratch folder called `hh`; and the HH
+  router asks `OsmandRegions.getRegionsToDownload` about the trip's ends, so the no-index regions
+  object must be a subclass returning an empty list, or every HH route throws "Reader == null".
+  `hh-routing-obf-write` is NOT used: it splits by OsmAnd's own country names and crashes on ours;
+  the standalone section the shortcut step writes is combined with `BinaryInspector -c`. The
+  history below is why it mattered:
   **WITHOUT HH, A LONG OFFLINE ROUTE CAN FAIL OUTRIGHT, NOT MERELY RUN SLOW (measured 2026-08-17
   against a real baked Bayern obf, using ObfRouteEngine's own config and memory limits).** NB the
   threshold is REGION-DEPENDENT, not a fixed distance: a 150 km cross-file route in Saarland/
@@ -5651,7 +5887,7 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   until then "Get places" reports no pack available.
   **Pack freshness (2026-07-07): rev + monthly cron + row-level deltas.** Manifest rows carry
   `rev`/`updatedAt`/`counts{poi,addr,streetpt,streetname}` and optionally `delta{fromRev,url,sizeMb}`;
-  `poi-packs.yml` has two monthly `schedule` crons (3rd and 5th, 07:15 UTC); since 2026-09-22 each builds HALF the catalog by sorted id (`shard`, picked from which cron fired), because the whole 458-row catalog is past the 256-job matrix cap and the single cron refused itself at plan time. `road-features.yml` (4th and 6th) and the quarterly maxspeed dispatch (`all=true` with `shard=a`, then `b`) are split the same way.
+  `poi-packs.yml` is run by the bake conductor every 30 days as two dispatches (`group=all`, `shard=a` / `b`: HALF the catalog each by sorted id, because the whole 458-row catalog is past the 256-job matrix cap). `road-features.yml` and maxspeed (`all=true` with `shard=a`, then `b`) are split the same way.
   `build-poi-region.sh` reads the LIVE manifest for the old rev, downloads the previous zip BEFORE clobbering
   it, builds the delta (`scripts/poipack_delta.py`, SQL EXCEPT per table into del_/ins_ tables), and publishes
   it only when it is under half the full size. App: installed revs in `poipacks/revs.json`
@@ -5665,10 +5901,20 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   delta balloons to pack size). `TABLE_COLUMNS` in PoiPackStore mirrors `poipack_build.py` +
   `poipack_delta.py` - keep all three in sync (`PRAGMA user_version=2`). Gotcha: KDoc in PoiPackStore must
   not contain a literal `del_*/ins_*` (the `*/` ends the comment). `OfflinePoiStore.search` orders
-  whole-query name matches first so they survive the internal 400-row cap (thousands of category hits used
-  to crowd out an exact name match in a state pack; found live while verifying deltas). v1-format packs
+  whole-query name matches first, then nearest, so both survive the internal 400-row cap (thousands of
+  category hits used to crowd out an exact name match; without the distance term the cap took rows in
+  table order and offline "Restaurants" came back from across the state). Offline search also reads the
+  downloaded places ARCHIVES (`PlacesArchiveSearch`, z17 tile rings around the search point) and ranks
+  both sources in `OfflineRank`; category queries stay within 100 km. v1-format packs
   (published before rev existed) have no rev; their first v2 rebuild yields no usable delta so clients just
   full-download once, then deltas kick in.
+- **A region's pack can be its PARENT's (`RegionPacks.packFor`, 2026-09-29).** Pack ids match
+  routing ids only for unsplit regions; a piece names its parent in parentheses ("Bayern (Germany)")
+  and uses that pack if it covers the piece's center. Every pack lookup goes through it (download,
+  Get places, Settings rows, delete keeps a pack another installed piece uses, updates, sizes). A
+  parent over `AUTO_PARENT_MAX_MB` (600 zipped) is not chained into a piece's download. Before this,
+  288 of 447 regions had no pack. Area save still picks a pack by box alone (can name a pack that
+  does not hold the area, e.g. Spain for Andorra): known, not fixed.
 - **The AREA SAVE reads the region's PLACE PACK, not Overpass (issue #304, 2026-09-13).**
   `downloadOfflinePois` first looks up the smallest place-pack region covering the area's center in
   the poi-pack manifest: pack installed = nothing to do; graph installed but no pack (a region from
@@ -5689,7 +5935,7 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   enrichment from memory. `MapViewModel.roadFeaturesCover*` returns LOADED / NONE / FAILED: NONE
   (no region in the manifest) is the only case that still reaches Overpass; FAILED shows nothing
   and retries next viewport (a failure is never cached). The world is baked (the `road-features` release carries a file per catalog region, refreshed by
-  the 4th/6th monthly crons); Overpass remains only where no region covers the point. Local
+  the bake conductor every 30 days); Overpass remains only where no region covers the point. Local
   test: bake one region with the osmium + `scripts/road_features_tsv.py` steps, serve it with a
   manifest on :8099, `adb reverse`, build with `-ProadFeaturesManifestUrl=`.
   **THE CORRIDOR QUERY ANR'D THE APP ON A LONG ROUTE (2026-09-13, three ANR traces from a
@@ -6001,9 +6247,12 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   selection changes; Google-fallback boards stay one-shot on purpose (a refresh there is a whole
   WebView load). The Google blob paths
   (fetchBoardFrom / resolveIntersectionStopBoard) remain the FALLBACK where Transitous lacks coverage.
-  `buildBoard` is pure + unit-tested (TransitousTest). Remaining phase-2 candidate: transit
-  directions via `/api/v1/plan` as a FALLBACK only - Google stays the primary transit router on
-  purpose (its ETAs are traffic/history-aware; GTFS-RT only knows current lateness).
+  `buildBoard` is pure + unit-tested (TransitousTest). **Phase 2 shipped 2026-09-28:**
+  `Transitous.plan` (`/api/v1/plan`, `parsePlan` fixture-tested in `TransitousPlanTest`) gives
+  transit directions when Google is off or answered nothing; `MapViewModel.transitTrips` is the one
+  call site (the chooser, the mode-chip ETA and the stop-timeline fallback all go through it). Google
+  stays the primary transit router on purpose (its ETAs are traffic/history-aware; GTFS-RT only
+  knows current lateness). The planner's walk legs carry no distance text and the itinerary no fare.
 - **A board needs no Google listing (2026-09-22):** `fetchStopDepartures` used to return before
   Transitous whenever the place had no Google feature id, and the Google-off tap path never
   called it, so an OpenStreetMap station tapped with Google off showed no departures although
@@ -6121,6 +6370,10 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   the puck at essentially one spot and pushing it per frame would recompose the label 60x a second.
   The pill is width-capped and CLAMPED into the viewport so a long name near a screen edge cannot
   run off it.
+- **The trace header names the build (2026-09-28):** Vela version and build, Android version, device
+  model and the nav settings that change the camera, then the rows, then an `events` section: every
+  `NavSession` note (reroute, faster route, silent upgrade) timed on the rows' clock. A shared trace
+  once showed 25 route swaps in 19 minutes with no way to tell why or on which build.
 - **Nav smoothness trace (`app/diag/NavTrace`, Settings > Diagnostics, OFF by default, issue #251
   2026-08-10).** One row per nav frame - t, along-route progress, speed, bearing WINDOW, chordBrg,
   displayBearing, live camera bearing, frame dt - into a bounded 72k ring (oldest dropped), written
@@ -6188,7 +6441,10 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   top (board/alight large, in-between small) and walk legs as dotted gray links, all inserted below
   the route line layer (empty in transit mode) so the drawing sits above roads + the satellite
   raster and below labels; a camera-fit branch (sibling of the route fit, keyed on coords + insets)
-  frames the trip between the endpoints card and the chooser. MapScreen gates the param to the
+  frames the trip between the endpoints card and the chooser; with NO row expanded the same
+  branch frames `tripEndpoints` (start, stops, destination, computed in MapSurface) and the inset
+  growth does not null the camera target, or the transit tab flew to the destination alone
+  (2026-09-28). MapScreen gates the param to the
   open, non-navigating TRANSIT chooser - OR to step-by-step transit nav (issue #232, 2026-08-08,
   device-verified): there the WHOLE guided itinerary draws and `transitNavLeg` (the guided leg's
   index) narrows the camera fit to THAT leg's coords, re-framing on every Next/auto-advance;
@@ -6341,7 +6597,11 @@ with a random 5 to 20 s backoff. Run the repair by hand after any wave to be sur
   gray rail (the colored rail starts at your stop, Google's treatment) and opens scrolled to the
   boarding stop (`rememberLazyListState(initialFirstVisibleItemIndex = priors)`). A moved time
   renders the timetable time struck through beside the live one - red when late, green when early
-  or on time (`TransitStopTime.delayMin`, signed; the feed carries EARLY runs too, verified live). The headsign-geocode + itinerary-reuse path (`itineraryStep`) remains the FALLBACK for
+  or on time (`TransitStopTime.delayMin`, signed; the feed carries EARLY runs too, verified live).
+  **A LOOPING trip picks its lap by the tapped departure's time (2026-09-28):** a Davis Unitrans
+  line became ONE trip per bus per day (589 stops, the stop recurring every lap), and nearest-stop
+  boarding took the 6:55 AM pass and listed the whole day; `tripStops` now takes the departure's
+  epoch and the timeline is one lap (SPEC 8). The headsign-geocode + itinerary-reuse path (`itineraryStep`) remains the FALLBACK for
   Google-fallback boards (their departures carry no tripId) and trip-fetch failures. NB transit
   DIRECTIONS still ride Google on purpose (traffic-aware ETAs) - this moved only the stops list.
   Boards still DROP fully-canceled runs (`canceled`/`tripCanceled`/`place.canceled`); showing

@@ -328,14 +328,27 @@ OFFLINE_ADDR_FILL  = 20     // offline rows whose blank address is filled from t
 OFFLINE_AT_ADDR_M  = 40.0   // a place this close to a typed address is "at" it
 ```
 
-- **Places** come from `OfflinePoiStore.search`: the small area-save index plus every installed
-  region pack, same SQL. It matches the whole phrase and, for several words, each word of three
-  letters or more, against name and category, and the whole phrase against the address too, and expands category words to the
-  OpenStreetMap values actually stored ("gas" is `Fuel`, "coffee" is `Cafe`). Whole-phrase name
-  matches are ordered first **before** the 400-row cap, so a state pack's thousands of cafes
-  cannot push out the one exact name. Ranking: transit stops last unless the query asks for
-  transit (a US stop is named after its corner, so any street word matched hundreds of them),
-  then the number of query words hit, then distance. At most 30 rows.
+- **Places** come from two sources, ranked together by `OfflineRank`:
+  - `OfflinePoiStore.search`: the small area-save index plus every installed region pack (OSM),
+    same SQL. It matches the whole phrase and, for several words, each word of three letters or
+    more, against name and category, and the whole phrase against the address too, and expands
+    category words to the OpenStreetMap values actually stored ("gas" is `Fuel`, "coffee" is
+    `Cafe`). Whole-phrase name matches come first and then the NEAREST rows, both **before** the
+    400-row cap, so a state pack's thousands of cafes cannot push out the one exact name or the
+    ones around you. Without the distance term the cap took rows in table order, effectively
+    random across a state, and "Restaurants" listed places far away.
+  - `PlacesArchiveSearch`: the downloaded places archives the map draws (Overture, AllThePlaces
+    and OSM, so far more businesses than the pack). It reads the archive's deepest zoom, where
+    every place is present, in rings of tiles out from the search point until it has 60 matches
+    or reaches about 3 km (12 rings of z17 tiles). A restaurant you can tap on the map is one
+    you can search for offline. Downtown Davis: 144 restaurants in 42 ms.
+
+  Ranking: transit stops last unless the query asks for transit (a US stop is named after its
+  corner, so any street word matched hundreds of them), then the number of query words hit (a
+  category row counts for its chip word: "Restaurants" hits the category "Restaurant"), then
+  distance. A category query keeps to 100 km of the search point, so with no data for the area
+  it answers nothing rather than a downloaded state across the country; a name search is never
+  cut. The same name within 120 m is one place. At most 30 rows.
 - **Addresses**, when the text looks like one, come from `OfflineAddressStore.geocode` in four
   layers, stopping at the first that answers:
   1. the exact house number on the street;
@@ -367,6 +380,19 @@ With Settings > Privacy > "Use Vela without Google" on, the data source never ca
 - `search` is two Photon calls merged: 20 rows ranked by Photon's own importance with a soft bias
   toward you, then 10 from the hard metro box for the partial-address case. The box used to lead,
   and on a device it showed fuzzy address rows two states away and never the city itself.
+- The view model runs Vela's own search too (`googleFreeLocal`: the place packs plus the places
+  archive the map draws, Overture, AllThePlaces and OSM, read from the download or, with no
+  download there, STREAMED from the release host the map streams it from). A category query
+  ("Restaurants", the chips) is answered by that alone whenever it finds anything, with no
+  Photon call; a name or address query puts Vela's rows first and Photon's after, a same-name
+  row within 120 m dropped (issue #626). Before, the local data answered only when Photon came
+  back empty, so a category search with Google off returned Photon's name matches.
+- Streaming reads the archive by HTTP `Range` (`PmtilesReader.Archive.http`): the header, the
+  directory pages (cached across searches, keyed by the header so a rebake never reuses a stale
+  one), then the z17 tiles in rings around the search point, up to 8 rings (about 2 km), with
+  neighboring tiles merged into one range because PMTiles stores them together. Downtown
+  Wilmington, "Restaurants": 79 matches from 5 requests and 265 KB in under a second the first
+  time, 3 requests and 84 ms after.
 - "More results", the nearby pass and the ambient merge have nothing to work with: the page
   search and the ambient fan-out answer empty.
 
@@ -388,8 +414,13 @@ maxMeters = 3_000.0   // RouteCorridor.alongRoute: a result must be this close t
   pass, and there is no ambient merge, no house-number geocoding and no intent parsing.
 - **A corridor filter.** `RouteCorridor.alongRoute` keeps results within 3 km of the polyline.
 - **Travel order.** The list is sorted by how far along the route each result sits, and the
-  distance shown is that along-route distance, not the crow-flies distance from the midpoint
-  (which read as two stations at opposite ends of the trip both "5.9 mi" away).
+  distance shown is that along-route distance plus the result's distance off the line, not the
+  crow-flies distance from the midpoint (which read as two stations at opposite ends of the trip
+  both "5.9 mi" away). Along-route alone showed a place 1 km to the side, level with the car, as
+  "10 ft".
+- **Only the road ahead, while driving.** During a drive the search runs on the route after the
+  car's progress (`RouteCorridor.ahead`, cut at `NavState.traveledM`), so places already passed
+  drop out and distances count from the car, not from where the trip started.
 - **A pick becomes a stop.** Planning a trip, the destination is stashed and the picked place is
   added as a stop, returning you to the chooser; closing the search returns to the trip too.
   Navigating, a pick from the list becomes the next stop on the live drive. A stray tap on the map
@@ -454,8 +485,9 @@ corridor-filtered like the phone's. [Chapter 10](10-android-auto.md) covers the 
 - **Search along a route is one window at the route's midpoint.** On a trip much longer than the
   roughly 25 km window, stops near either end are simply not in the answer; there is no per-leg
   sampling. It also has no offline path: with no signal it reports that the search failed.
-- **Google off loses categories online.** Photon has no category search, and the packs are
-  consulted only when Photon returns nothing.
+- **Google off streams at most about 2 km of places.** A category search with no download reads
+  8 rings of tiles around the search point; farther places come only from a place pack, if one
+  is installed.
 - **Intents need a table.** A language without a word table gets English and plain search; Chinese
   and Japanese get no fuzzy pass over their own words, only over the English fallback.
 - **Your saved places do not enter the results list**, only the suggestions. A search for the name

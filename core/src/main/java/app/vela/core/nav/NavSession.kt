@@ -219,11 +219,9 @@ class NavSession @Inject constructor(
         // Google's markup gives "Head toward F St"; add the cardinal so guidance
         // says "Head east on F St" like Google's own voice.
         val first = Heading.withCardinal(route.maneuvers.firstOrNull()?.instruction.orEmpty(), route.polyline)
-        // The opener is the first thing the voice says on every drive, so it honors the
-        // spoken-street-names switch too (issue #596). The BANNER keeps `first`: the switch is
+        // The opener ([openerFor]) is the first thing the voice says on every drive, so it honors
+        // the spoken-street-names switch too (issue #596). The BANNER keeps `first`: the switch is
         // about what is read aloud, never about what is shown.
-        val firstSpoken =
-            Heading.withCardinal(route.maneuvers.firstOrNull()?.spokenInstruction().orEmpty(), route.polyline)
         _state.value = State(
             navigating = true,
             route = route,
@@ -248,13 +246,30 @@ class NavSession @Inject constructor(
         // speakOpener (not speak): briefly hold the opener until the first road's real romanized name
         // has loaded from the map tiles, so a foreign street isn't read as an ICU skeleton at T=0 while
         // the nav-zoom tiles are still loading (issue #184). Falls through to speaking after a short cap.
-        voice.speakOpener(app.vela.core.i18n.NavStringsRegistry.current().startNav(firstSpoken))
+        voice.speakOpener(openerFor(route))
         diag.record(
             "nav",
             "start → ${destinationLabel.ifBlank { "destination" }} " +
                 "(${route.distanceMeters?.toInt()} m, ${route.maneuvers.size} steps, " +
                 "ETA ${route.durationInTrafficSeconds ?: route.durationSeconds}s)",
         )
+    }
+
+    /** The line [start] opens a drive of [route] with: the start phrase and the first instruction,
+     *  with its compass heading and the spoken-street-names switch applied. */
+    fun openerFor(route: Route): String = app.vela.core.i18n.NavStringsRegistry.current().startNav(
+        Heading.withCardinal(route.maneuvers.firstOrNull()?.spokenInstruction().orEmpty(), route.polyline),
+    )
+
+    /** Prepare the first lines of a drive of [route] while it is only being previewed: the opener
+     *  and the first turns' prompts at starting speed ([NavEngine.startPrompts]), so Start plays them
+     *  without synthesizing while the camera flies in to the driving view. */
+    fun prepareStart(route: Route, imperial: Boolean, onDone: () -> Unit = {}) {
+        if (_state.value.navigating || route.maneuvers.isEmpty()) { onDone(); return }
+        // In speaking order, so a start that cannot wait for all of them has the first ones.
+        val lines = listOf(openerFor(route)) + NavEngine.startPrompts(route, imperial)
+        val left = java.util.concurrent.atomic.AtomicInteger(lines.size)
+        lines.forEach { voice.prepare(it) { if (left.decrementAndGet() == 0) onDone() } }
     }
 
     fun stop() {
@@ -440,27 +455,48 @@ class NavSession @Inject constructor(
                 }
             }
         }
-        announceStopsPassed(route, next.traveledM)
+        // A jump past the next stop is a skip, not an arrival: hold the stops and reroute through
+        // them (again each fix until a new route lands; the reroute gate paces the requests).
+        val skipped = synchronized(stopLock) {
+            val prev = if (route === progressRoute) progressM else null
+            progressRoute = route
+            progressM = next.traveledM
+            if (route === planRoute && prev != null &&
+                NavEngine.stopSkipped(stopMarks, stops.size, passedStops, prev, next.traveledM, STOP_ARRIVE_TOL_M, STOP_SKIP_JUMP_M)
+            ) skipHoldRoute = route
+            skipHoldRoute != null && skipHoldRoute === route
+        }
+        if (skipped) {
+            if (!skipNoted) { note("progress jumped past a stop, not counting it: rerouting through the stops"); skipNoted = true }
+            if (!replayMode) reroute(loc, bearingDeg) // replays play recorded swaps back instead
+        } else {
+            skipNoted = false
+            announceStopsPassed(route, next.traveledM)
+        }
         maybeRecheck(loc, next)
     }
 
+    // The progress seen on the last fix, for the jump check above (guarded by stopLock).
+    private var progressRoute: Route? = null
+    private var progressM = 0.0
+    private var skipHoldRoute: Route? = null
+    private var skipNoted = false
+
     /** Per-stop arrival cue: as along-route progress passes each waypoint's mark, announce it once, in
-     *  order ("You've reached <stop>"). A stop with no mark (not locatable on the route) is skipped
-     *  silently rather than blocking the rest. [route] must be the route [traveledM] was measured on —
-     *  if a reroute swapped the plan mid-fix, the identity check drops the stale frame instead of
-     *  comparing old progress to new marks (which would fire every cue at once). */
+     *  order ("You've reached <stop>"). A stop with no mark (not locatable on the route) is passed
+     *  silently once a later stop is ([NavEngine.stopsPassed]); it used to count as passed at once,
+     *  which dropped every stop on the first fix after a stops edit. [route] must be the route
+     *  [traveledM] was measured on: if a reroute swapped the plan mid-fix, the identity check drops
+     *  the stale frame instead of comparing old progress to new marks (which would fire every cue at once). */
     private fun announceStopsPassed(route: Route, traveledM: Double) {
         val toSpeak = mutableListOf<String>()
         synchronized(stopLock) {
             if (route !== planRoute) return
-            while (passedStops < stops.size) {
-                val mark = stopMarks.getOrNull(passedStops)
-                if (mark == null) { passedStops++; continue }
-                if (traveledM >= mark - STOP_ARRIVE_TOL_M) {
-                    if (!stops[passedStops].silent) toSpeak += stops[passedStops].label
-                    passedStops++
-                } else break
+            val passed = NavEngine.stopsPassed(stopMarks, stops.size, passedStops, traveledM, STOP_ARRIVE_TOL_M)
+            for (i in passedStops until passed) {
+                if (stopMarks.getOrNull(i) != null && !stops[i].silent) toSpeak += stops[i].label
             }
+            passedStops = passed
         }
         toSpeak.forEach { label ->
             voice.speak(app.vela.core.i18n.NavStringsRegistry.current().reachedStop(label))
@@ -1095,6 +1131,9 @@ class NavSession @Inject constructor(
         const val MIN_PLAUSIBLE_ETA_FRACTION = 0.4
         // Fire the per-stop cue when along-route progress gets within this of the stop's mark (as you pass).
         const val STOP_ARRIVE_TOL_M = 25.0
+        /** Progress farther than this in ONE fix is a jump, not driving (1 Hz fixes at highway
+         *  speed move about 35 m). */
+        const val STOP_SKIP_JUMP_M = 250.0
 
         /** Primary + secondary display lines for a destination, robust to partial data. Offline
          *  routing often has no business name — just "123 Main St" from the offline geocoder, a

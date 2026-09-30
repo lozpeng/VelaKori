@@ -17,6 +17,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -61,9 +63,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import app.vela.core.data.tiles.GoogleSatelliteTiles
-import app.vela.core.data.tiles.TiandiTuStatellite
 import org.maplibre.android.geometry.LatLng as MLLatLng
 import org.maplibre.android.geometry.LatLngBounds as MLLatLngBounds
+
+import app.vela.core.data.tiles.TiandiTuStatellite
 
 private const val ROUTE_SRC = "vela-route-src"
 // A search from a view this tall (meters, north to south) keeps its camera when at least
@@ -168,6 +171,7 @@ private const val SAVED_SRC = "vela-saved-src"
 private const val SAVED_LAYER = "vela-saved"
 private const val SAVED_INDEX_PROP = "savedIdx"
 private const val SAVED_ICON_PROP = "savedIcon"
+private const val SAVED_PIN_SCALE = 1.35f
 // Street View pose: the open pano's position + live view direction (a rotating cone, pegman-style),
 // shown while the half-screen pano viewer is up so the map underneath says where you're looking.
 private const val SV_SRC = "vela-sv-src"
@@ -205,6 +209,7 @@ private const val OSM_COVER_FRAC = 0.18f
 // synchronous render-thread round trips and its trigger events can fire per frame - the floor is
 // what makes the cost bounded regardless of event chatter (the vc2909 P4a freeze).
 private const val OVL_GATE_MIN_GAP_MS = 1200L
+
 private const val CONTROLS_SRC = "vela-controls-src" // OSM traffic lights + stop signs drawn at high zoom
 private const val CONTROLS_LAYER = "vela-controls"
 private const val CONTROLS_CLAIM_LAYER = "vela-controls-claim" // invisible collision box over the labels
@@ -253,7 +258,9 @@ private const val PREVIEW_SRC = "vela-preview-src"
 private const val PREVIEW_LAYER = "vela-preview"
 /** Camera-bearing damping (issue #251). Heavy while the camera is essentially tracking a straight
  *  road, so digitization wiggle does not rotate the map; quick once the error is turn-sized. */
-private const val NAV_IDLE_TICK_MS = 120L // the nav loop's pace while parked and settled (issue #605)
+private const val NAV_IDLE_TICK_MS = 120L
+private const val BROWSE_IDLE_FRAMES = 30 // settled frames before the free-drive follow loop slows down
+private const val BROWSE_IDLE_TICK_MS = 200L // its pace while settled // the nav loop's pace while parked and settled (issue #605)
 private const val CAM_BRG_TAU_STILL = 1.6
 private const val CAM_BRG_TAU_TURN = 0.35
 /** Error at which the damping is fully in "this is a real turn" mode. Well above the few degrees
@@ -451,6 +458,13 @@ private var placesPreviewLandmarks = false
 // places bake carries them now.
 private var placesHideCivic = false
 private const val PREVIEW_LANDMARK_PROMINENCE = 5.5
+/** The first seconds of a DRIVE: the places layers stay hidden while the follow camera flies in
+ *  from the route overview, and appear once it has settled (`NAV_PLACES_HOLD_MS`). Visible, every
+ *  zoom the fly-in passes through loads and filters the dense places tiles of every mounted
+ *  archive; hidden, the source is not asked for tiles at all. Measured on a 4a, demo drive, fps in
+ *  seconds 4 to 6 after Start: 16/7/23 with the layers up, 29/45/50 hidden. */
+private var placesNavHold = false
+private const val NAV_PLACES_HOLD_MS = 7000L
 
 /** Re-apply the id exclusions (and the drive-nav fuel-only rule) to the open places layers
  *  (icons + dots) without rebuilding them. */
@@ -480,7 +494,10 @@ private fun applyOpenPlacesHidden(style: Style) {
     runCatching {
         style.layers.filter { it.id.startsWith("vela-places-") }.forEach { l ->
             when (l) {
-                is SymbolLayer -> l.setFilter(iconFilter)
+                is SymbolLayer -> {
+                    l.setFilter(iconFilter)
+                    l.setProperties(PropertyFactory.visibility(if (placesNavHold) Property.NONE else Property.VISIBLE))
+                }
                 is CircleLayer -> {
                     l.setFilter(idFilter ?: Expression.literal(true))
                     l.setProperties(PropertyFactory.visibility(if (placesNavFuelOnly || placesNavDriveSet || placesPreviewLandmarks) Property.NONE else Property.VISIBLE))
@@ -542,6 +559,7 @@ private val ambientRedo2 = arrayOfNulls<Runnable>(1) // ... and the late one
 private val lastCameraMoveMs = longArrayOf(0L)
 private const val TWIN_PASS_STILL_MS = 700L
 /** Free-drive look-ahead (speed x 5 m) time constant: slow on purpose, see the free-drive ticker. */
+private const val FOLLOW_JUMP_M = 1000.0
 private const val FREE_LOOKAHEAD_TAU_S = 2.5f
 
 private fun flightCb() = object : org.maplibre.android.maps.MapLibreMap.CancelableCallback {
@@ -592,6 +610,10 @@ fun VelaMapView(
     // and the camera frames THAT leg instead of the whole trip, re-framing on each advance.
     transitPreview: app.vela.core.model.TransitItinerary? = null,
     transitNavLeg: Int? = null,
+    // The trip's own points (start, stops, destination) while the transit chooser is up with no
+    // row expanded: the camera frames the trip like the route fit does for drive. Without it the
+    // tab switch dropped the drive fit and the next frame flew to the destination alone.
+    tripEndpoints: List<LatLng> = emptyList(),
 
     // Per-segment live traffic as (startFraction, endFraction, level) along the route
     // — colors the route line like Google (free-flow elsewhere). Empty = no live data.
@@ -929,6 +951,11 @@ fun VelaMapView(
         prefs.edit().putBoolean("map_init_inflight", true).apply()
         val opts = org.maplibre.android.maps.MapLibreMapOptions.createFromAttributes(context)
             .textureMode(prefs.getBoolean("texture_render", fragileGpuDefault()))
+        // Open where the app already thinks it is (last known fix or the simulated point), at
+        // street zoom: from MapLibre's world default the first follow flew in through every zoom.
+        (cameraTarget ?: myLocation)?.let { p ->
+            opts.camera(org.maplibre.android.camera.CameraPosition.Builder().target(MLLatLng(p.lat, p.lng)).zoom(15.5).build())
+        }
         MapView(context, opts).apply {
             onCreate(null)
             isFocusable = false
@@ -939,6 +966,9 @@ fun VelaMapView(
 
     var mapRef by remember { mutableStateOf<MapLibreMap?>(null) }
     var mapInitRequested by remember { mutableStateOf(false) }
+    // Settings > Map "Tilt with two fingers" applies at once, not at the next map start.
+    val tiltGestures = app.vela.ui.MapTilt.on.value
+    LaunchedEffect(tiltGestures, mapRef) { mapRef?.uiSettings?.isTiltGesturesEnabled = tiltGestures }
     // Ending nav returns the camera to Google's flat north-up browse view — the follow camera's
     // last bearing/tilt used to linger, which also left the compass pinned on the map (it only
     // hides facing north; user 2026-07-10). Below mapRef so the handle is in scope.
@@ -965,7 +995,21 @@ fun VelaMapView(
     val puckOverlayY = remember { androidx.compose.runtime.mutableFloatStateOf(Float.NaN) }
     val puckOverlayRot = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
     val puckOverlaySquash = remember { androidx.compose.runtime.mutableFloatStateOf(1f) }
+    val puckOverlayTilt = remember { androidx.compose.runtime.mutableFloatStateOf(0f) } // degrees, for the 3D icons
     val puckOverlayHidLayer = remember { booleanArrayOf(false) } // ME_ARROW_LAYER hidden for the overlay
+    fun showPuckOverlay(style: Style, x: Float, y: Float, relBearing: Double, tiltDeg: Double) {
+        puckOverlayX.floatValue = x
+        puckOverlayY.floatValue = y
+        puckOverlayRot.floatValue = ((relBearing.toFloat() % 360f) + 360f) % 360f
+        puckOverlaySquash.floatValue = kotlin.math.cos(Math.toRadians(tiltDeg)).toFloat().coerceIn(0.2f, 1f)
+        puckOverlayTilt.floatValue = tiltDeg.toFloat()
+        if (!puckOverlayOn.value) puckOverlayOn.value = true
+        if (!puckOverlayHidLayer[0]) {
+            puckOverlayHidLayer[0] = true
+            puckOverlayOwnsArrow = true
+            style.getLayer(ME_ARROW_LAYER)?.setProperties(PropertyFactory.visibility(Property.NONE))
+        }
+    }
     fun dropPuckOverlay() {
         if (puckOverlayOn.value) puckOverlayOn.value = false
         lastPuckScreen[0] = Float.NaN
@@ -994,6 +1038,7 @@ fun VelaMapView(
         val leg = transitNavLeg?.let { transitLegCoords(transitPreview, it) }
         if (!leg.isNullOrEmpty()) leg else all
     }
+    val transitFitCoords = transitPrevCoords.ifEmpty { tripEndpoints }
     var lastRecenterTick by remember { mutableStateOf(-1) }
     var lastFittedMarkersKey by remember { mutableStateOf<Int?>(null) }
     var lastPreviewTarget by remember { mutableStateOf<LatLng?>(null) }
@@ -1218,6 +1263,20 @@ fun VelaMapView(
     // while navigating (keeping even the top rank still left labels flickering at the threshold)
     // for a clean nav map, and restore on exit. Keyed on styleRef so it re-applies after a style
     // (re)load (dark/light flip), which recreates the layers at default visibility.
+    // Drive start: the places layers stay off through the fly-in (see placesNavHold). Its own
+    // effect, keyed on the drive alone: a style reload mid-hold rebuilds the layers through
+    // applyOpenPlacesHidden, which reads the flag, and ending the drive early releases it.
+    LaunchedEffect(navMode && navDriveMode) {
+        if (!(navMode && navDriveMode)) return@LaunchedEffect
+        placesNavHold = true
+        styleRef?.let { applyOpenPlacesHidden(it) }
+        try {
+            kotlinx.coroutines.delay(NAV_PLACES_HOLD_MS)
+        } finally {
+            placesNavHold = false
+            styleRef?.let { applyOpenPlacesHidden(it) }
+        }
+    }
     LaunchedEffect(navMode, navDriveMode, styleRef, topographyOn) {
         val style = styleRef ?: return@LaunchedEffect
         val vis = if (navMode) Property.NONE else Property.VISIBLE
@@ -1291,6 +1350,9 @@ fun VelaMapView(
                     // real landmarks - Google keeps major water names in nav too; a viewport has
                     // a handful at most, so the cost is noise). Town/city/state stay likewise.
                     "label_other", "label_village",
+                    // One-way arrows (2026-09-29): a symbol every few dozen meters along every
+                    // one-way street from z16, the nav zoom; the route line says which way to go.
+                    "road_one_way_arrow", "road_one_way_arrow_opposite",
                 ).mapNotNull { style.getLayer(it) } +
                     style.layers.filter { it.id.startsWith("vela-addr-") }
                 ).forEach { it.setProperties(PropertyFactory.visibility(dvis)) }
@@ -2070,7 +2132,10 @@ fun VelaMapView(
                 PropertyFactory.textSize(13f * lc),
             )
             st.getLayer(MARKERS_DOTS_LAYER)?.setProperties(PropertyFactory.iconSize(sc))
-            st.getLayer(SAVED_LAYER)?.setProperties(PropertyFactory.iconSize(sc))
+            // 1.35x: measured on the Davis fixture at browse zoom, a typical POI icon's disc is 65 px
+            // on screen and a prominent one 77; the list pin was 48 at 1x and 60 at 1.25x, so it read
+            // smaller than every icon beside it (issue #618). 1.35x puts its ringed disc at 65.
+            st.getLayer(SAVED_LAYER)?.setProperties(PropertyFactory.iconSize(SAVED_PIN_SCALE * sc))
             st.getLayer(FLOCK_LAYER)?.setProperties(
                 PropertyFactory.iconSize(
                     Expression.interpolate(
@@ -2101,8 +2166,16 @@ fun VelaMapView(
             return@LaunchedEffect
         }
         var lastNanos = 0L
+        // IDLE PACING (2026-09-29): this loop ran every frame for as long as the bare map was
+        // open with follow on (the default), settled or not: Perfetto on the 4a showed ~59
+        // animation frames a second and ~9% of a core on the main thread with nothing on screen
+        // changing. After BROWSE_IDLE_FRAMES frames with nothing to move it waits
+        // BROWSE_IDLE_TICK_MS between checks; the first frame that moves anything resets it.
+        var idleFrames = 0
         while (true) {
+            if (idleFrames > BROWSE_IDLE_FRAMES) kotlinx.coroutines.delay(BROWSE_IDLE_TICK_MS)
             val now = withFrameNanos { it }
+            idleFrames++
             val dt = (if (lastNanos == 0L) 0.0 else ((now - lastNanos) / 1e9)).toFloat().coerceIn(0f, 0.1f)
             lastNanos = now
             val style = styleRef ?: continue
@@ -2177,8 +2250,17 @@ fun VelaMapView(
                 // between the ~1 Hz fixes instead of coasting to each one and stopping, so the follow
                 // reads as a continuous glide (closer to the nav feel) rather than a per-second ease.
                 val k = (1f - kotlin.math.exp(-dt / 0.22f)).toDouble()
-                browseCam[0] += (tgtLat - browseCam[0]) * k
-                browseCam[1] += (tgtLng - browseCam[1]) * k
+                // A target past FOLLOW_JUMP_M (a stale last-known spot replaced by a fresh fix, a
+                // relaunch far from where the app last was) is a jump, not motion: easing across it
+                // dragged the map through every tile in between.
+                val farLat = (tgtLat - browseCam[0]) * 111_320.0
+                val farLng = (tgtLng - browseCam[1]) * 111_320.0 * kotlin.math.cos(Math.toRadians(tgtLat))
+                if (farLat * farLat + farLng * farLng > FOLLOW_JUMP_M * FOLLOW_JUMP_M) {
+                    browseCam[0] = tgtLat; browseCam[1] = tgtLng
+                } else {
+                    browseCam[0] += (tgtLat - browseCam[0]) * k
+                    browseCam[1] += (tgtLng - browseCam[1]) * k
+                }
                 camLat = browseCam[0]; camLng = browseCam[1]
                 lookLat = camLat; lookLng = camLng
                 val cp = cam.cameraPosition
@@ -2251,6 +2333,7 @@ fun VelaMapView(
                 if (kotlin.math.abs(browseZoomGoal[0] - z) < 0.02) browseZoomGoal[0] = Double.NaN
                 else zoomEase = z + (browseZoomGoal[0] - z) * (1f - kotlin.math.exp(-dt / 0.22f)).toDouble()
             }
+            if (moved || !zoomEase.isNaN() || browseFlying[0]) idleFrames = 0
             if (moved || !zoomEase.isNaN()) {
                 // Draw the puck at the EASED follow position (camLat/camLng), not the raw fix: at the
                 // raw fix the dot teleported forward on the map each 1 Hz fix while the camera eased to
@@ -2429,6 +2512,7 @@ fun VelaMapView(
         // movement brings it straight back to full rate.
         val lastCamWrite = DoubleArray(7) { Double.NaN }
         var idleFrames = 0
+        val detachedCam = DoubleArray(5) { Double.NaN } // live camera last frame, while detached
         // The dot's source only when it moved: a GeoJSON upload is a re-render, and before the arrow
         // engages (a parked car) this ran on every frame with the same point.
         val lastMe = DoubleArray(3) { Double.NaN }
@@ -2710,16 +2794,7 @@ fun VelaMapView(
                     // camera state just set, so the two cannot disagree by a frame. Same look:
                     // rotated by the bearing relative to the camera, squashed by the tilt.
                     val scr = cam.projection.toScreenLocation(MLLatLng(pt.lat, pt.lng))
-                    puckOverlayX.floatValue = scr.x
-                    puckOverlayY.floatValue = scr.y
-                    puckOverlayRot.floatValue = (((navPuck.displayBearing - camState[2]).toFloat() % 360f) + 360f) % 360f
-                    puckOverlaySquash.floatValue = kotlin.math.cos(Math.toRadians(navTiltEase[0])).toFloat().coerceIn(0.2f, 1f)
-                    if (!puckOverlayOn.value) puckOverlayOn.value = true
-                    if (!puckOverlayHidLayer[0]) {
-                        puckOverlayHidLayer[0] = true
-                        puckOverlayOwnsArrow = true
-                        style.getLayer(ME_ARROW_LAYER)?.setProperties(PropertyFactory.visibility(Property.NONE))
-                    }
+                    showPuckOverlay(style, scr.x, scr.y, navPuck.displayBearing - camState[2], navTiltEase[0])
                     // Where the arrow sits on screen, for the road label pinned under it (issue
                     // #288). Reported only while FOLLOWING (the camera parks the arrow, so this
                     // fires on the rare real move) and from the same projection the overlay uses,
@@ -2736,7 +2811,27 @@ fun VelaMapView(
                     }
                 } else {
                     camState[0] = Double.NaN // reset → re-attach eases in from the live camera
-                    dropPuckOverlay()
+                    // DETACHED (a pan, a rotate, a pinch, the overview): the overlay stays, projected
+                    // through the camera the gesture just set. Handing the puck back to the map
+                    // symbol here made it flat (the 3D icons too) and brought back the async-upload
+                    // jitter the overlay exists to fix (user 2026-09-29).
+                    val live = cam?.cameraPosition
+                    if (cam != null && live != null) {
+                        val scr = cam.projection.toScreenLocation(MLLatLng(pt.lat, pt.lng))
+                        showPuckOverlay(style, scr.x, scr.y, navPuck.displayBearing - live.bearing, live.tilt)
+                        // A parked car slows this loop to NAV_IDLE_TICK_MS; a moving camera (the
+                        // user's pan or rotate) must keep it at frame rate or the overlay trails.
+                        val t = live.target
+                        val camMoved = t == null || kotlin.math.abs(t.latitude - detachedCam[0]) > 1e-7 ||
+                            kotlin.math.abs(t.longitude - detachedCam[1]) > 1e-7 ||
+                            kotlin.math.abs(live.zoom - detachedCam[2]) > 1e-4 ||
+                            kotlin.math.abs(live.bearing - detachedCam[3]) > 0.01 || kotlin.math.abs(live.tilt - detachedCam[4]) > 0.01
+                        if (camMoved) {
+                            idleFrames = 0
+                            detachedCam[0] = t?.latitude ?: 0.0; detachedCam[1] = t?.longitude ?: 0.0
+                            detachedCam[2] = live.zoom; detachedCam[3] = live.bearing; detachedCam[4] = live.tilt
+                        } else idleFrames++
+                    } else dropPuckOverlay()
                 }
                 // Keep the driven/ahead cut EXACTLY under the arrow WITHOUT moving geometry for it.
                 // The cut moves every frame, but any geometry re-upload for it - even at the old
@@ -2941,14 +3036,17 @@ fun VelaMapView(
                 // explicitly so it can't be off, and lift the default ~60° cap to 70° so a
                 // satisfying near-horizon 3D is reachable; browse-camera moves use
                 // newLatLngZoom (which preserves pitch), so a tilt the user sets sticks.
-                map.uiSettings.isTiltGesturesEnabled = true
+                map.uiSettings.isTiltGesturesEnabled = app.vela.ui.MapTilt.on.value
                 // Two-finger tilt was nearly impossible to trigger (user 2026-07-11): stock
-                // shove detection wants both fingers moving in near-perfect vertical parallel
-                // (20 degrees). Widen the accepted angle and drop the start threshold so a
-                // casual two-finger drag tilts.
+                // shove detection wants the fingers within 20 degrees of level. Widen the
+                // accepted angle so a casual two-finger drag tilts. The START threshold stays
+                // near stock (20 dp of vertical travel of the fingers' midpoint; stock is 16):
+                // at 8 px, the wobble of a pinch's fingers settling started a tilt before the
+                // pinch's 7 dp zoom threshold, and MapLibre makes tilt and zoom mutually
+                // exclusive, so the pinch tilted instead of zooming (issue #627).
                 runCatching {
                     map.gesturesManager.shoveGestureDetector.maxShoveAngle = 55f
-                    map.gesturesManager.shoveGestureDetector.pixelDeltaThreshold = 8f
+                    map.gesturesManager.shoveGestureDetector.pixelDeltaThreshold = 20f * context.resources.displayMetrics.density
                 }
                 map.setMaxPitchPreference(60.0)
                 // Tap a labeled POI on the map to open it. (Named so the D-pad
@@ -3275,8 +3373,11 @@ fun VelaMapView(
                         val zoomNow = map.cameraPosition.zoom
                         val style = map.style
                         // Buildings + the overlay only draw at z16+ (Google-like close zoom). Below
-                        // that the query can't change anything - bail before any probing.
-                        if (style == null || zoomNow < 16.0) {
+                        // that the query can't change anything - bail before any probing. Not while
+                        // NAVIGATING either (2026-09-28): the follow camera moves every frame, so the
+                        // gate re-probed rendered features on the main thread every 1.2 s for the
+                        // whole drive; the verdict from before the drive stands until it ends.
+                        if (style == null || zoomNow < 16.0 || navModeHolder.value) {
                             if (ovlGateKey[0] != "off") { overlayState.value("none"); ovlGateKey[0] = "off" }
                             return@runCatching
                         }
@@ -3969,7 +4070,7 @@ fun VelaMapView(
             // Not while a route is up: the route fit re-frames for the new inset itself, and a
             // nulled target made the NEXT frame fly to the selected place, canceling that fit
             // (the chooser's "Compare routes" swap landed zoomed in on the destination, 2026-09-17).
-            if (grew && !(routePolyline.size >= 2 && !navMode)) lastCameraTarget = null // re-frame the current target against the new inset
+            if (grew && !(routePolyline.size >= 2 && !navMode) && transitFitCoords.size < 2) lastCameraTarget = null // re-frame the current target against the new inset
         }
         // While the results sheet is closed forget the last marker fit, so pulling the list back
         // up frames the cluster again even after a manual pan away - EXCEPT while a place sheet
@@ -4138,11 +4239,11 @@ fun VelaMapView(
             // visible strip between the endpoints card and the chooser, once per (itinerary,
             // insets) - the same grammar as the route fit above. routePolyline is empty in
             // transit mode, so the branches never compete.
-            transitPrevCoords.size >= 2 &&
-                (transitPrevCoords.hashCode() * 31 + cameraBottomInsetPx * 7 + cameraTopInsetPx) != lastFittedTransitKey -> {
-                lastFittedTransitKey = transitPrevCoords.hashCode() * 31 + cameraBottomInsetPx * 7 + cameraTopInsetPx
+            transitFitCoords.size >= 2 &&
+                (transitFitCoords.hashCode() * 31 + cameraBottomInsetPx * 7 + cameraTopInsetPx) != lastFittedTransitKey -> {
+                lastFittedTransitKey = transitFitCoords.hashCode() * 31 + cameraBottomInsetPx * 7 + cameraTopInsetPx
                 val builder = MLLatLngBounds.Builder()
-                transitPrevCoords.forEach { builder.include(MLLatLng(it.lat, it.lng)) }
+                transitFitCoords.forEach { builder.include(MLLatLng(it.lat, it.lng)) }
                 val fp = fitPadding(map, cameraTopInsetPx, cameraBottomInsetPx, 140)
                 runCatching {
                     flightDepth[0]++
@@ -4252,7 +4353,26 @@ fun VelaMapView(
             }
         }
     }
-    if (puckOverlayOn.value) {
+    val puckMesh = if (puckOverlayOn.value) remember(app.vela.ui.PuckStyle.key()) {
+        PuckModels.forShape(app.vela.ui.PuckStyle.shape.value, app.vela.ui.PuckStyle.carColor.value)
+    } else null
+    if (puckOverlayOn.value && puckMesh != null) {
+        // The car, UFO, ship and duck are 3D models drawn from the camera's own tilt and the
+        // heading each frame (both read in the draw phase, so no recomposition per frame).
+        val sizePx = (202 * app.vela.ui.PuckStyle.scale()).toInt()
+        androidx.compose.foundation.Canvas(
+            Modifier
+                .graphicsLayer {
+                    translationX = puckOverlayX.floatValue - sizePx / 2f
+                    translationY = puckOverlayY.floatValue - sizePx / 2f
+                }
+                .size(with(density) { sizePx.toDp() }),
+        ) {
+            drawIntoCanvas { c ->
+                puckMesh.draw(c.nativeCanvas, size.width / 2f, size.height / 2f, size.width, puckOverlayRot.floatValue, puckOverlayTilt.floatValue)
+            }
+        }
+    } else if (puckOverlayOn.value) {
         val puckKey = app.vela.ui.PuckStyle.key()
         val puckImg = remember(puckKey) { navPuckBitmap().asImageBitmap() }
         val sizePx = puckImg.width
@@ -4592,6 +4712,7 @@ private fun ensureLayers(style: Style) {
         style.addLayer(
             SymbolLayer(SAVED_LAYER, SAVED_SRC).withProperties(
                 PropertyFactory.iconImage(Expression.get(SAVED_ICON_PROP)),
+                PropertyFactory.iconSize(SAVED_PIN_SCALE),
                 PropertyFactory.iconAllowOverlap(true),
                 PropertyFactory.iconIgnorePlacement(false), // claims its spot, see the parking pin
             ).apply { minZoom = 8f },
@@ -5582,6 +5703,8 @@ private val PLACE_LABEL_LAYERS = listOf(
     "label_country_1", "label_country_2", "label_country_3", "label_state",
     "label_city_capital", "label_city", "label_town", "label_village", "label_other",
     "poi_r1", "poi_r7", "poi_r20", "poi_transit",
+    // Seas, oceans, lakes and rivers (issue #619): Liberty labels them name:latin like places.
+    "water_name_point_label", "water_name_line_label", "waterway_line_label",
 )
 
 private fun applyPlaceLabelLanguage(style: StyleLayers) {
@@ -5977,17 +6100,17 @@ private const val SAT_ROADS_LAYER = "vela-sat-roads"
 // Esri World Imagery, the openly usable satellite tile service (attribution shown by the map UI
 // while the layer is on). z/y/x order; 19 is the safe global max.
 private val SAT_TILES = TiandiTuStatellite.tiles()
-    //Array(1) { "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"}
+    //"https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 
 private const val SAT_DEEP_LAYER = "vela-sat-deep"
 private const val SAT_DEEP_SRC = "vela-sat-deep-src" // suffixed with the provider+level so a change swaps cleanly
-// Google's imagery tiles (the same keyless surface the rest of the app scrapes) - the DEEP-aZOOM
+// Google's imagery tiles (the same keyless surface the rest of the app scrapes) - the DEEP-ZOOM
 // FALLBACK only, used where Esri's native coverage stops at z19. Outside cities Google upsamples
 // rather than 404s, so the fallback never paints holes; true 404s (open ocean) fall back to the
 // overzoomed parent tile like any failed raster fetch.
-private val SAT_G_TILES =GoogleSatelliteTiles.tiles() //"https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
+private val SAT_G_TILES = GoogleSatelliteTiles.tiles()
+    //"https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
 private const val SAT_DEEP_MIN_ZOOM = 18.6f // = the cross-fade's first stop; below it the layer was invisible yet loading tiles
-
 
 /** The deep-imagery layer for the current area: Esri at its probed native max level, or the Google
  *  fallback to z21. The source id carries provider+level, so moving between areas with different
@@ -6167,7 +6290,7 @@ private fun ensureSatellite(style: Style, on: Boolean) {
     val present = style.getLayer(SAT_LAYER) != null
     if (on && !present) {
         if (style.getSource(SAT_SRC) == null) {
-            style.addSource(RasterSource(SAT_SRC, TileSet("2.2.0", *SAT_TILES).apply { maxZoom = 18f }, 256))
+            style.addSource(RasterSource(SAT_SRC, TileSet("2.2.0", *SAT_TILES).apply { maxZoom = 19f }, 256))
         }
         val layer = RasterLayer(SAT_LAYER, SAT_SRC).withProperties(
             // Dim + desaturate a touch so the white-halo labels stay readable over bright
@@ -6742,6 +6865,12 @@ internal fun applyDark(style: StyleLayers) {
     }
     style.getLayer("vela-trails")?.setProperties(PropertyFactory.lineColor("#167055")) // park foot trails, sampled
     style.getLayer("vela-bikeroutes")?.setProperties(PropertyFactory.lineColor("#1f8f9c")) // bike teal, lightened for the dark land
+    // Airports: Liberty's aeroway layers carry light-map colors (a pale area, near-white runways)
+    // and no pass reached them, so every airport drew as a light block on the dark map.
+    style.getLayer("aeroway_fill")?.setProperties(PropertyFactory.fillColor("#1c2638"), PropertyFactory.fillOpacity(1f))
+    listOf("aeroway_runway", "aeroway_taxiway").forEach {
+        style.getLayer(it)?.setProperties(PropertyFactory.lineColor("#2a4056"))
+    }
     // Terrain relief for the night palette: deep shadows + a cool blue-gray
     // highlight so ridges catch a little moonlight (a touch stronger than light).
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
@@ -6817,6 +6946,10 @@ internal fun applyAmoled(style: StyleLayers) {
     }
     style.getLayer("vela-trails")?.setProperties(PropertyFactory.lineColor("#1A3A28"))
     style.getLayer("vela-bikeroutes")?.setProperties(PropertyFactory.lineColor("#0D2D36"))
+    style.getLayer("aeroway_fill")?.setProperties(PropertyFactory.fillColor("#0A0C0F"), PropertyFactory.fillOpacity(1f))
+    listOf("aeroway_runway", "aeroway_taxiway").forEach {
+        style.getLayer(it)?.setProperties(PropertyFactory.lineColor("#1A1D22"))
+    }
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
         PropertyFactory.hillshadeExaggeration(0.3f),
         PropertyFactory.hillshadeShadowColor(Expression.literal(black)),
@@ -6975,6 +7108,10 @@ internal fun applyClassicDark(style: StyleLayers) {
     }
     style.getLayer("vela-trails")?.setProperties(PropertyFactory.lineColor("#167055"))
     style.getLayer("vela-bikeroutes")?.setProperties(PropertyFactory.lineColor("#1f8f9c"))
+    style.getLayer("aeroway_fill")?.setProperties(PropertyFactory.fillColor("#31363f"), PropertyFactory.fillOpacity(1f))
+    listOf("aeroway_runway", "aeroway_taxiway").forEach {
+        style.getLayer(it)?.setProperties(PropertyFactory.lineColor("#565b64"))
+    }
     style.getLayer(HILLSHADE_LAYER)?.setProperties(
         PropertyFactory.hillshadeExaggeration(0.4f),
         PropertyFactory.hillshadeShadowColor(Expression.literal("#0b0d10")),
@@ -7974,6 +8111,12 @@ internal fun navPuckBitmap(
     // Drawn in the original 176-space and scaled whole, so the disc/arrow/shadow proportions the
     // user tuned in July stay byte-identical - only the rendered size grows.
     canvas.scale(size / 176f, size / 176f)
+    when (app.vela.ui.PuckStyle.shape.value) {
+        app.vela.ui.PuckStyle.SHAPE_CAR -> { drawCarPuck(canvas, app.vela.ui.PuckStyle.carColor.value); return bmp }
+        app.vela.ui.PuckStyle.SHAPE_UFO -> { drawUfoPuck(canvas); return bmp }
+        app.vela.ui.PuckStyle.SHAPE_SHIP -> { drawShipPuck(canvas); return bmp }
+        app.vela.ui.PuckStyle.SHAPE_DUCK -> { drawDuckPuck(canvas); return bmp }
+    }
     val cx = 88f
     val cy = 88f
     val r = 65f
@@ -8019,6 +8162,151 @@ internal fun navPuckBitmap(
         },
     )
     return bmp
+}
+
+/** A top-down car pointing up, centered in the 176-space the arrow uses (discussion #611). */
+private fun drawCarPuck(canvas: Canvas, colorName: String) {
+    val body = android.graphics.Color.parseColor(
+        when (colorName) {
+            "blue" -> "#1a46e5"
+            "white" -> "#F4F5F7"
+            "green" -> "#1E9E5A"
+            "yellow" -> "#F2C230"
+            else -> "#D93025"
+        },
+    )
+    val hsv = FloatArray(3).also { android.graphics.Color.colorToHSV(body, it) }
+    val edge = android.graphics.Color.HSVToColor(floatArrayOf(hsv[0], hsv[1], hsv[2] * 0.62f))
+    val roof = android.graphics.Color.HSVToColor(floatArrayOf(hsv[0], hsv[1] * 0.85f, (hsv[2] * 1.08f).coerceAtMost(1f)))
+    val glass = android.graphics.Color.parseColor("#26303B")
+    fun paint(c: Int, stroke: Float = 0f) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = c
+        if (stroke > 0f) { style = Paint.Style.STROKE; strokeWidth = stroke } else style = Paint.Style.FILL
+    }
+    val cx = 88f
+    val shell = android.graphics.RectF(cx - 29f, 30f, cx + 29f, 146f)
+    // Soft shadow, then mirrors, then the body with a darker rim.
+    canvas.drawRoundRect(
+        android.graphics.RectF(shell.left, shell.top + 6f, shell.right, shell.bottom + 6f), 24f, 24f,
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.argb(80, 0, 0, 0)
+            maskFilter = android.graphics.BlurMaskFilter(10f, android.graphics.BlurMaskFilter.Blur.NORMAL)
+        },
+    )
+    canvas.drawOval(android.graphics.RectF(cx - 38f, 66f, cx - 25f, 76f), paint(body))
+    canvas.drawOval(android.graphics.RectF(cx + 25f, 66f, cx + 38f, 76f), paint(body))
+    canvas.drawRoundRect(shell, 24f, 24f, paint(body))
+    canvas.drawRoundRect(shell, 24f, 24f, paint(edge, 3f))
+    // Windshield, roof, rear window.
+    canvas.drawPath(Path().apply {
+        moveTo(cx - 20f, 60f); lineTo(cx + 20f, 60f); lineTo(cx + 24f, 80f); lineTo(cx - 24f, 80f); close()
+    }, paint(glass))
+    canvas.drawRoundRect(android.graphics.RectF(cx - 22f, 82f, cx + 22f, 118f), 8f, 8f, paint(roof))
+    canvas.drawPath(Path().apply {
+        moveTo(cx - 22f, 120f); lineTo(cx + 22f, 120f); lineTo(cx + 18f, 132f); lineTo(cx - 18f, 132f); close()
+    }, paint(glass))
+    // Headlights and taillights.
+    val head = paint(android.graphics.Color.parseColor("#FFF6C8"))
+    canvas.drawOval(android.graphics.RectF(cx - 23f, 33f, cx - 11f, 40f), head)
+    canvas.drawOval(android.graphics.RectF(cx + 11f, 33f, cx + 23f, 40f), head)
+    val tail = paint(android.graphics.Color.parseColor("#B3261E"))
+    canvas.drawRoundRect(android.graphics.RectF(cx - 24f, 139f, cx - 12f, 144f), 2f, 2f, tail)
+    canvas.drawRoundRect(android.graphics.RectF(cx + 12f, 139f, cx + 24f, 144f), 2f, 2f, tail)
+}
+
+private fun fill(c: Int) = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = c; style = Paint.Style.FILL }
+private fun line(c: Int, w: Float) = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = c; style = Paint.Style.STROKE; strokeWidth = w }
+private fun hex(s: String) = android.graphics.Color.parseColor(s)
+private fun softShadow(canvas: Canvas, rect: android.graphics.RectF) = canvas.drawOval(
+    android.graphics.RectF(rect.left, rect.top + 6f, rect.right, rect.bottom + 6f),
+    Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.argb(80, 0, 0, 0)
+        maskFilter = android.graphics.BlurMaskFilter(10f, android.graphics.BlurMaskFilter.Blur.NORMAL)
+    },
+)
+
+/** A flying saucer seen from above, a yellow light marking the front (discussion #611). */
+private fun drawUfoPuck(canvas: Canvas) {
+    val cx = 88f; val cy = 90f
+    softShadow(canvas, android.graphics.RectF(cx - 56f, cy - 56f, cx + 56f, cy + 56f))
+    canvas.drawCircle(cx, cy, 55f, fill(hex("#9AA3AD")))
+    canvas.drawCircle(cx, cy, 55f, line(hex("#59616A"), 3f))
+    canvas.drawCircle(cx, cy, 41f, fill(hex("#C9CFD6")))
+    for (i in 0 until 10) {
+        val a = Math.toRadians(i * 36.0 - 90.0)
+        val lx = cx + 48f * kotlin.math.cos(a).toFloat(); val ly = cy + 48f * kotlin.math.sin(a).toFloat()
+        canvas.drawCircle(lx, ly, 4.5f, fill(if (i == 0) hex("#FFE066") else if (i % 2 == 0) hex("#4FC3F7") else hex("#FF8A80")))
+    }
+    canvas.drawPath(Path().apply { moveTo(cx, cy - 72f); lineTo(cx + 9f, cy - 57f); lineTo(cx - 9f, cy - 57f); close() }, fill(hex("#FFE066")))
+    canvas.drawCircle(cx, cy, 23f, fill(hex("#8FE3FF")))
+    canvas.drawCircle(cx, cy + 3f, 11f, fill(hex("#7ED957")))
+    canvas.drawCircle(cx - 4.5f, cy + 1f, 2.6f, fill(android.graphics.Color.BLACK))
+    canvas.drawCircle(cx + 4.5f, cy + 1f, 2.6f, fill(android.graphics.Color.BLACK))
+    canvas.drawOval(android.graphics.RectF(cx - 15f, cy - 17f, cx - 3f, cy - 10f), fill(android.graphics.Color.argb(170, 255, 255, 255)))
+    canvas.drawCircle(cx, cy, 23f, line(hex("#3A8FB0"), 2f))
+}
+
+/** A cartoon pirate ship from above, bow forward, with a black flag (discussion #611). */
+private fun drawShipPuck(canvas: Canvas) {
+    val cx = 88f
+    val hull = Path().apply {
+        moveTo(cx, 22f)
+        cubicTo(cx + 28f, 44f, cx + 32f, 90f, cx + 28f, 132f)
+        quadTo(cx, 156f, cx - 28f, 132f)
+        cubicTo(cx - 32f, 90f, cx - 28f, 44f, cx, 22f)
+        close()
+    }
+    softShadow(canvas, android.graphics.RectF(cx - 32f, 24f, cx + 32f, 152f))
+    canvas.drawPath(hull, fill(hex("#8B5A2B")))
+    canvas.drawPath(hull, line(hex("#4E3118"), 3f))
+    val deck = Path().apply {
+        moveTo(cx, 36f)
+        cubicTo(cx + 20f, 54f, cx + 23f, 90f, cx + 20f, 126f)
+        quadTo(cx, 144f, cx - 20f, 126f)
+        cubicTo(cx - 23f, 90f, cx - 20f, 54f, cx, 36f)
+        close()
+    }
+    canvas.drawPath(deck, fill(hex("#C08A55")))
+    for (y in listOf(60f, 80f, 100f, 120f)) canvas.drawLine(cx - 20f, y, cx + 20f, y, line(hex("#9C6B3C"), 1.5f))
+    // Sails across the beam, fore and aft, then the masts and the flag.
+    for (y in listOf(66f, 106f)) {
+        canvas.drawRoundRect(android.graphics.RectF(cx - 38f, y - 7f, cx + 38f, y + 7f), 7f, 7f, fill(hex("#F4EAD5")))
+        canvas.drawRoundRect(android.graphics.RectF(cx - 38f, y - 7f, cx + 38f, y + 7f), 7f, 7f, line(hex("#B9AC92"), 2f))
+        canvas.drawCircle(cx, y, 5f, fill(hex("#4E3118")))
+    }
+    canvas.drawRect(android.graphics.RectF(cx + 3f, 42f, cx + 21f, 54f), fill(hex("#1B1B1B")))
+    canvas.drawCircle(cx + 12f, 47f, 3.2f, fill(android.graphics.Color.WHITE))
+    canvas.drawLine(cx + 9f, 51.5f, cx + 15f, 51.5f, line(android.graphics.Color.WHITE, 1.4f))
+    canvas.drawLine(cx + 3f, 42f, cx + 3f, 58f, line(hex("#4E3118"), 2.2f))
+}
+
+/** A rubber duck from above, beak forward (discussion #611). */
+private fun drawDuckPuck(canvas: Canvas) {
+    val cx = 88f
+    val yellow = hex("#FFD93B"); val edge = hex("#D9A600")
+    softShadow(canvas, android.graphics.RectF(cx - 36f, 36f, cx + 36f, 150f))
+    canvas.drawPath(Path().apply { moveTo(cx - 10f, 138f); lineTo(cx, 156f); lineTo(cx + 10f, 138f); close() }, fill(yellow))
+    val body = android.graphics.RectF(cx - 35f, 60f, cx + 35f, 148f)
+    canvas.drawOval(body, fill(yellow))
+    canvas.drawOval(body, line(edge, 2.5f))
+    canvas.drawOval(android.graphics.RectF(cx - 33f, 88f, cx - 17f, 124f), fill(hex("#FFE77A")))
+    canvas.drawOval(android.graphics.RectF(cx + 17f, 88f, cx + 33f, 124f), fill(hex("#FFE77A")))
+    // A flat bill sticking out past the head, wide at the face and rounded at the tip.
+    val bill = Path().apply {
+        moveTo(cx - 13f, 42f)
+        lineTo(cx - 10f, 24f)
+        quadTo(cx, 12f, cx + 10f, 24f)
+        lineTo(cx + 13f, 42f)
+        close()
+    }
+    canvas.drawPath(bill, fill(hex("#FF8C1A")))
+    canvas.drawPath(bill, line(hex("#C85F00"), 1.5f))
+    canvas.drawCircle(cx, 58f, 25f, fill(yellow))
+    canvas.drawCircle(cx, 58f, 25f, line(edge, 2.5f))
+    for (dx in listOf(-10f, 10f)) {
+        canvas.drawCircle(cx + dx, 52f, 4.2f, fill(android.graphics.Color.BLACK))
+        canvas.drawCircle(cx + dx + 1.3f, 50.8f, 1.4f, fill(android.graphics.Color.WHITE))
+    }
 }
 
 /** A Google-style red map pin with a white center dot, anchored at its bottom tip. */

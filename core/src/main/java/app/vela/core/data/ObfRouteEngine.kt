@@ -42,10 +42,13 @@ import java.util.concurrent.ConcurrentHashMap
  * [MEMORY_MB] and fail outright, so until the bake generates HH, offline obf routing is a
  * city/metro feature.
  */
-class ObfRouteEngine(private val obfRoot: File) : RouteEngine {
+class ObfRouteEngine(private val obfRootOf: () -> File) : RouteEngine {
+    constructor(root: File) : this({ root })
+    private val obfRoot: File get() = obfRootOf()
 
     private data class Region(val id: String, val s: Double, val w: Double, val n: Double, val e: Double) {
         fun covers(p: LatLng) = OfflinePhrases.inBox(s, w, n, e, p.lat, p.lng)
+        val box get() = doubleArrayOf(s, w, n, e)
     }
 
     private val readers = ConcurrentHashMap<String, BinaryMapIndexReader>()
@@ -65,39 +68,49 @@ class ObfRouteEngine(private val obfRoot: File) : RouteEngine {
         // EROFS killed every route. Pre-seed the holder with the no-file constructor and keep the
         // feature off so the empty index is never consulted.
         RoutePlannerFrontEnd.CALCULATE_MISSING_MAPS = false
-        runCatching { net.osmand.PlatformUtil.setOsmandRegions(net.osmand.map.OsmandRegions(false)) }
+        // The highway-hierarchy router also asks it which OsmAnd download regions hold the trip's
+        // ends, and a regions object with no index throws ("Reader == null"). Answering "none"
+        // is what HH reads as "no restriction" (containsStartEndRegion), so the stub says that.
+        runCatching {
+            net.osmand.PlatformUtil.setOsmandRegions(object : net.osmand.map.OsmandRegions(false) {
+                override fun getRegionsToDownload(lat: Double, lon: Double): MutableList<net.osmand.binary.BinaryMapDataObject> = mutableListOf()
+            })
+        }
     }
 
     override fun isReady(mode: TravelMode): Boolean =
         profileFor(mode) != null && regions().any { it.id !in failed && hasObf(it.id) }
 
-    override fun route(origin: LatLng, destination: LatLng, mode: TravelMode, avoidTolls: Boolean, avoidHighways: Boolean, avoidFerries: Boolean, departBearingDeg: Double?): List<Route> {
-        val profile = profileFor(mode) ?: return emptyList()
-        val all = regions()
-        // MULTI-FILE routing (2026-08-03): OsmAnd's router reads across obf files natively - the
-        // OsmAnd app itself ships one file per region and routes over all of them - so hand it
-        // EVERY installed region that intersects the trip's padded bounding box rather than
-        // demanding one file cover both endpoints. This is what lets big countries ship as
-        // CI-bakeable sub-region pieces behind a single country button: a route across a Land
-        // border pulls road tiles from both files. The pad (a quarter of the span, floored at
-        // ~30 km) covers detours that bow outside the endpoints' box.
-        val padLat = kotlin.math.max(0.27, kotlin.math.abs(origin.lat - destination.lat) * 0.25)
-        val padLng = kotlin.math.max(0.27, kotlin.math.abs(origin.lng - destination.lng) * 0.25)
-        val bs = kotlin.math.min(origin.lat, destination.lat) - padLat
-        val bn = kotlin.math.max(origin.lat, destination.lat) + padLat
-        val bw = kotlin.math.min(origin.lng, destination.lng) - padLng
-        val be = kotlin.math.max(origin.lng, destination.lng) + padLng
-        val cands = all.filter { it.id !in failed && it.s < bn && it.n > bs && it.w < be && it.e > bw }
-        android.util.Log.d(TAG, "route $mode: ${all.size} installed, ${cands.size} intersecting trip box")
-        // The UNION must cover both endpoints, else the trip genuinely leaves the installed data.
-        // Both early outs log: a silent empty here read as "No drive route found" with nothing to
-        // go on (2026-09-14, a simulated origin outside the region looked like a broken file).
+    override fun covers(origin: LatLng, destination: LatLng, mode: TravelMode): Boolean =
+        profileFor(mode) != null && candidatesFor(origin, destination, regions()) != null
+
+    /** The installed regions a trip can route over, or null when their union does not cover both
+     *  ends. MULTI-FILE routing (2026-08-03): OsmAnd's router reads across obf files natively (the
+     *  OsmAnd app itself ships one file per region and routes over all of them), so the router gets
+     *  EVERY installed region that intersects the trip's padded bounding box rather than one file
+     *  covering both endpoints. This is what lets big countries ship as CI-bakeable sub-region
+     *  pieces behind a single country button: a route across a Land border pulls road tiles from
+     *  both files. The pad (a quarter of the span, floored at ~30 km) covers detours that bow
+     *  outside the endpoints' box. Both early outs log: a silent empty here read as "No drive route
+     *  found" with nothing to go on (2026-09-14, a simulated origin outside the region looked like
+     *  a broken file). */
+    private fun candidatesFor(origin: LatLng, destination: LatLng, all: List<Region>): List<Region>? {
+        val boxes = all.filter { it.id !in failed }.map { it.box }
+        val keep = tripCandidates(boxes, origin, destination)
+        val cands = all.filter { it.id !in failed }.filterIndexed { i, _ -> i in keep }
+        android.util.Log.d(TAG, "route: ${all.size} installed, ${cands.size} intersecting trip box")
         val originIn = cands.any { it.covers(origin) }
         val destIn = cands.any { it.covers(destination) }
         if (!originIn || !destIn) {
-            android.util.Log.d(TAG, "route $mode: endpoint outside installed data (origin in=$originIn, destination in=$destIn; origin ${"%.4f".format(origin.lat)},${"%.4f".format(origin.lng)})")
-            return emptyList()
+            android.util.Log.d(TAG, "route: endpoint outside installed data (origin in=$originIn, destination in=$destIn; origin ${"%.4f".format(origin.lat)},${"%.4f".format(origin.lng)})")
+            return null
         }
+        return cands
+    }
+
+    override fun route(origin: LatLng, destination: LatLng, mode: TravelMode, avoidTolls: Boolean, avoidHighways: Boolean, avoidFerries: Boolean, departBearingDeg: Double?): List<Route> {
+        val profile = profileFor(mode) ?: return emptyList()
+        val cands = candidatesFor(origin, destination, regions()) ?: return emptyList()
         val readers = cands.mapNotNull { reader(it) }
         if (readers.isEmpty()) {
             android.util.Log.w(TAG, "route $mode: no readable file among ${cands.map { it.id }} (failed=${failed})")
@@ -127,6 +140,15 @@ class ObfRouteEngine(private val obfRoot: File) : RouteEngine {
                     // (checked in the vendored bytecode). A soft preference, not a hard filter.
                     if (departBearingDeg != null) config.initialDirection = departBearingDeg / 180.0 * Math.PI
                     val fe = RoutePlannerFrontEnd()
+                    // Highway hierarchy (SPEC 4.5): a region baked with it routes a long trip over
+                    // precomputed shortcuts in well under a second and a fraction of the memory,
+                    // where the plain search runs out of MEMORY_MB on a dense network. Car and bike
+                    // (the bake builds both profiles; walking has none). With an avoid too: the bake adds a set for
+                    // avoid_motorway and the router filters the default set for tolls and ferries;
+                    // a file baked before the avoid set costs about a second before it falls back.
+                    // A file without HH, or a trip across two files, falls back to the plain
+                    // search inside searchRoute on its own.
+                    if (mode == TravelMode.DRIVE || mode == TravelMode.BICYCLE) fe.setDefaultHHRoutingConfig()
                     val ctx = fe.buildRoutingContext(
                         config, null, readers.toTypedArray(),
                         RoutePlannerFrontEnd.RouteCalculationMode.NORMAL,
@@ -359,6 +381,19 @@ class ObfRouteEngine(private val obfRoot: File) : RouteEngine {
     }
 
     internal companion object {
+        /** The indices of [boxes] (each `[s, w, n, e]`) that intersect the trip's padded box: a quarter
+         *  of the span each way, floored at ~30 km, so a detour that bows out of the endpoints' box
+         *  still has its tiles. Pure, so the phone-first reroute's coverage test is unit-tested. */
+        internal fun tripCandidates(boxes: List<DoubleArray>, origin: LatLng, destination: LatLng): Set<Int> {
+            val padLat = kotlin.math.max(0.27, kotlin.math.abs(origin.lat - destination.lat) * 0.25)
+            val padLng = kotlin.math.max(0.27, kotlin.math.abs(origin.lng - destination.lng) * 0.25)
+            val bs = kotlin.math.min(origin.lat, destination.lat) - padLat
+            val bn = kotlin.math.max(origin.lat, destination.lat) + padLat
+            val bw = kotlin.math.min(origin.lng, destination.lng) - padLng
+            val be = kotlin.math.max(origin.lng, destination.lng) + padLng
+            return boxes.indices.filter { i -> val b = boxes[i]; b[0] < bn && b[2] > bs && b[1] < be && b[3] > bw }.toSet()
+        }
+
         /** [alias] as the Latin form of [local], or null when it is missing, the same string, or
          *  carries a letter from another script (a non-Latin alias must never be stored as if it
          *  were romanized). Same rule as the tile path's `latinAliasOf` and the sidecar bake. */
@@ -374,7 +409,8 @@ class ObfRouteEngine(private val obfRoot: File) : RouteEngine {
         private const val TAG = "VelaObf"
         private const val JCL_LOG_PROP = "org.apache.commons.logging.Log"
 
-        // Route-calc heap budget passed to the OsmAnd router. Modest on purpose: the browse map
+        // Route-calc heap budget passed to the OsmAnd router (the plain search's; a highway-hierarchy
+        // route stays far under it: 30 to 80 MB for 70 to 256 km on a dense network). Modest on purpose: the browse map
         // already runs near the ceiling (CLAUDE.md memory rules) and the router allocates within
         // this bound, spilling to more tile loads instead of OOMing.
         private const val MEMORY_MB = 256

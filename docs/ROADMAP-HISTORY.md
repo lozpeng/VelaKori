@@ -19,6 +19,36 @@ and this file only the wording of that day. Entries moved out of the roadmap aft
 at the end, under their own heading, with the date they moved.
 
 ## Recently shipped
+
+- **Reroute on the phone first (deferred 2026-09-16, shipped 2026-09-28).** When a downloaded region covers the drive,
+  compute the reroute with the on-device engine at once, then swap in the traffic-aware online
+  route when it arrives through the existing heal path. Evidence: a shared diagnostics export
+  (issue #557) shows two urgent reroutes timing out at 20 s while the open router hung, and issue
+  #258 reports the same pattern in cities. Since 2026-09-17 the on-device engine is a bounded
+  FALLBACK inside a reroute; the "phone first, heal later" order is still open, held back because
+  every latch back onto the online route is new bug surface.
+  SHIPPED 2026-09-28: `RouteEngine.covers` (a trip-box test over the region index) gates it; the
+  urgent fetch starts the obf route beside the open router and takes it when the open router is
+  not back inside 2.5 s (the compute gets 4 s more, inside the budget). The latch back is the
+  existing degraded recheck (same course) and the faster-route offer (another course), nothing new.
+  Multi-stop trips chain their legs on the phone the same way.
+
+- **Camera detours over every candidate route (issue #600 follow-up, opened 2026-09-21, shipped 2026-09-28).** The shipped
+  "Try side streets around cameras" pass only detours the route that LEADS after the camera
+  re-rank, and the two stages can disagree: a route with three cameras on one arterial with a
+  parallel street beside it detours better than the one-camera route whose camera sits on a
+  bridge, but the one-camera route wins the re-rank and the pass never looks at the other. The
+  holistic version runs the cluster/offset pass on every drivable candidate, scores each result
+  by cameras left plus time added, and leads with the best. The cost is the request budget (six
+  per route instead of six in total), so it wants a shared cap or a cheap pre-screen that skips a
+  route whose cameras sit where the geometry offers no parallel road. Whether the two toggles then
+  become one switch is the same decision: today "avoid" costs no requests and "side streets"
+  costs a handful, which is why the second is nested and off.
+  SHIPPED 2026-09-28: the pass runs over every camera-bearing route in list order under one
+  six-request trip budget (four per route), skips a cluster within 60 m of one tried from an
+  earlier route (routes share arterials), and the leader plus every result go through the same
+  `CameraDetour.choose` rule the re-rank uses. The two toggles stay two: the re-rank is free and
+  the pass costs requests.
 - **Cronet for Google requests (2026-09-23).** Search, directions, place data and the batchexecute
   RPCs go over Chromium's network stack (HTTP/2 and HTTP/3 like Chrome) instead of OkHttp, behind
   calibration `useCronet`; OsmAnd's bundled protobuf is relocated at build time so both coexist.
@@ -178,8 +208,9 @@ worth an offline drive past a signed exit to hear it).
 - ~~Higher-res README screenshots~~ - **DONE 2026-06-21** (all 9 recaptured at
   1080×2400 on-device, current UI). Store screenshots when there's a store listing.
 - **Stability pass** - core flows smoke-tested on-device 2026-06-21 (fresh install →
-  search → route → transit → nav, no crashes). Still open: the *Start → launcher* quirk
-  (nav keeps running in the foreground service but the activity backgrounds).
+  search → route → transit → nav, no crashes). The *Start → launcher* quirk (nav keeps running in
+  the foreground service but the activity backgrounds) did not reproduce on 2026-09-29: after
+  Start, from the launcher and from a `geo:` link, the activity stayed resumed for 40 s.
 - ~~Custom directions origin~~ - **DONE + device-verified 2026-06-20 (in-panel
   editable From).** The directions panel's **From** row is tappable → opens search →
   the pick becomes the origin (`directionsOrigin: Place?`, route falls back to live
@@ -954,3 +985,32 @@ done so it *earns* trust rather than spends it:
   three signature algorithms short of current Chrome. The new jars are Java 25 class files, which
   needed a newer R8 pinned on the buildscript classpath. `zstd` is still not offered: Cronet keeps
   it behind a feature only a system flags file can turn on.
+
+## 2026-09-28: grid cells, app side
+
+- **Grid-cell downloads, app side (2026-09-27).** The bake exists (SPEC 7.6: 0.5 degree cells,
+  one zip per cell with obf + place pack + places slice, `cells-manifest.json` on `grid-cells`);
+  no cells are published yet. Next: the Download an area picker reads the manifest, pulls the
+  cells its frame touches, installs each part into the existing stores (obf into `ObfStore` with
+  the cell's box in `index.json`, the pack into `PoiPackStore`, the slice into `PlacesTileStore`),
+  and deletes by cell. Open: how a cell pack and a whole-region pack of the same area coexist in
+  search (duplicate rows), and per-cell updates by `rev`. Before a catalog-wide dispatch,
+  promote-stable and fdroid-repo must paginate their `gh release list` (about 450 new releases).
+  Shipped 2026-09-28: `CellStore` plus `installFile` on the three stores, the picker's cells
+  checkbox, the sequential download under the region card, per-region rows and delete in
+  Downloaded. The duplicate-pack rows, the one-archive places layer and per-cell updates stayed
+  open (ROADMAP).
+
+## 2026-09-28: grid cells, the layer and the pack rows
+
+- **Grid cells: the layer, the duplicate pack and updates.** The places layer mounts every
+  installed archive the view touches (the one-archive rule showed one cell at a time), a whole
+  region download drops the region's cells (the duplicate search rows), and the cells releases are
+  created on the root commit so they sort under the app releases (Obtainium reads only the first
+  100 releases; the promote and F-Droid queries paginate as well). Per-cell rev updates stay open.
+
+## 2026-09-28: per-cell updates
+
+- **Grid cells: per-cell updates.** Done the same evening: installed cell revs against the
+  manifest, an Update on the Downloaded row, and the automatic-updates setting re-pulls newer
+  cells whole (a cell is a few MB, so no delta).

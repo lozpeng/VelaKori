@@ -22,7 +22,7 @@ dependencies {
 
 android {
     namespace = "app.vela"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         // `-PappId=<id>` builds the app under another package name: the Android Auto ownership
@@ -31,7 +31,7 @@ android {
         // Play's library record alone or also the signing certificate. Never a shipped path.
         applicationId = (project.findProperty("appId") as String?)?.takeIf { it.isNotBlank() } ?: "app.vela"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 37
         // Overridable from CI: -PappVersionCode / -PappVersionName (ci.yml derives
         // them from the run number → 0.3.<run> / 2000+run). Defaults are local/dev only.
         versionCode = (project.findProperty("appVersionCode") as String?)?.toIntOrNull() ?: 1
@@ -89,6 +89,14 @@ android {
             "PLACES_MANIFEST_URL",
             "\"${(project.findProperty("placesManifestUrl") as String?)
                 ?: "http://8.152.157.180/vela/places-overlays/places-overlay-manifest.json"}\"",
+        )
+        // GRID CELLS (SPEC 7.6): half-degree pieces of a region, obf + pack + places slice per cell,
+        // pulled by the area picker; same override pattern (-PcellsManifestUrl=...).
+        buildConfigField(
+            "String",
+            "CELLS_MANIFEST_URL",
+            "\"${(project.findProperty("cellsManifestUrl") as String?)
+                ?: "http://8.152.157.180/vela/grid-cells/cells-manifest.json"}\"",
         )
         // Offline BASEMAP tiles (planetiler bakes of the Geofabrik extracts in the OpenMapTiles schema,
         // .github/workflows/basemap-tiles.yml) catalog, same override pattern (-PbasemapManifestUrl=...).
@@ -264,6 +272,7 @@ dependencies {
     implementation(libs.hilt.android)
     implementation(libs.hilt.navigation.compose)
     ksp(libs.kotlin.metadata.jvm)
+
     ksp(libs.hilt.compiler)
 
     implementation(libs.coil.compose)

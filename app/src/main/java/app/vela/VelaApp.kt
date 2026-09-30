@@ -91,6 +91,8 @@ class VelaApp : Application(), coil.ImageLoaderFactory {
         // Push the device class down to :core, which cannot read an :app holder (same seam as
         // CategoryFilter.enabled). Gates the ambient POI fan-out in GoogleMapsDataSource.
         app.vela.core.data.LowRamMode.enabled = app.vela.ui.MemoryPressure.lowRam
+        app.vela.offline.StorageLocation.init(this)
+        app.vela.offline.RoadNameTileSource.install(this) // street names for LineNamer (issue #478)
         Units.init(this)
         // The desktop window size Google's requests describe: picked once per install, then kept
         // (a size that changed per launch would be its own oddity). See BrowserViewport.
@@ -109,6 +111,10 @@ class VelaApp : Application(), coil.ImageLoaderFactory {
         TransitLayer.init(this)
         app.vela.ui.SatelliteLayer.init(this) // persisted satellite-imagery toggle
         app.vela.ui.LayersButton.init(this) // persisted show/hide of the map layers button
+        app.vela.ui.MapTilt.init(this) // two-finger tilt on/off (issue #627)
+        app.vela.ui.ParkingButton.init(this) // parking button shown with no spot saved (issue #626)
+        app.vela.ui.NavEndConfirm.init(this) // ask before ending a drive, off by default (issue #624)
+        app.vela.ui.SpeedDisplay.init(this) // speed + limit badge on/off, phone and car (issue #625)
         app.vela.ui.Topography.init(this)
         app.vela.ui.Flock.init(this) // load the persisted surveillance-camera toggle (else it read false every launch)
         app.vela.ui.SpeedCams.init(this) // same init-or-it-reads-false trap as Flock
@@ -142,12 +148,18 @@ class VelaApp : Application(), coil.ImageLoaderFactory {
         app.vela.ui.LiveReviews.init(this)
         app.vela.ui.ShowReviews.init(this)
         app.vela.ui.LoadPhotos.init(this)
+        app.vela.ui.ReviewsOnTap.init(this)
+        app.vela.ui.PhotosOnTap.init(this)
+        app.vela.ui.DetailsRetry.init(this)
+        app.vela.ui.RouteTrafficOnTap.init(this)
+        app.vela.core.data.RoutingPrefs.googleTraffic = !app.vela.ui.RouteTrafficOnTap.on.value
         app.vela.ui.HideAdult.init(this)
         app.vela.ui.HideExternalLinks.init(this)
         app.vela.ui.GoogleFree.init(this) // "Use Vela without Google": mirrors into the :core NoGoogle flag
         app.vela.ui.Buildings3d.init(this)
         app.vela.ui.RouteTrail.init(this)
         app.vela.ui.RoadLabel.init(this)
+        app.vela.ui.NavNorthUp.init(this)
         app.vela.ui.PuckStyle.init(this)
         app.vela.ui.HouseNumbers.init(this) // house-number zoom gate (issue #329)
         app.vela.ui.PreferButtons.init(this)

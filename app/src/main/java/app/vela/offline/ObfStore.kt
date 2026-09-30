@@ -28,7 +28,7 @@ class ObfStore @Inject constructor(
     @ApplicationContext private val context: Context,
     http: OkHttpClient,
 ) {
-    private val root = File(context.filesDir, "obf")
+    private val root: File get() = File(app.vela.offline.StorageLocation.root(context), "obf")
     private val revsLock = Any()
 
     /** The manifest rev the installed file came from (0 for files older than revs). */
@@ -39,9 +39,9 @@ class ObfStore @Inject constructor(
 
     fun writeRev(id: String, rev: Int) = synchronized(revsLock) {
         root.mkdirs()
-        File(root, "revs.json").writeText(readRevs().put(id, rev).toString())
+        app.vela.core.util.AtomicFiles.writeText(File(root, "revs.json"), readRevs().put(id, rev).toString())
     }
-    private val indexFile = File(root, "index.json")
+    private val indexFile: File get() = File(root, "index.json")
     private val indexLock = Any()
 
     // Region files are hundreds of MB - the shared client's 12 s scrape cap would abort the body
@@ -97,6 +97,19 @@ class ObfStore @Inject constructor(
         }.getOrElse { tmp.delete(); false }
     }
 
+    /** Install an obf already on disk (a grid cell's part, unpacked from its zip) as [id] over [box]
+     *  (`[s, w, n, e]`): moved into place, indexed, its rev recorded. False leaves nothing behind. */
+    fun installFile(id: String, tmp: File, box: DoubleArray, rev: Int): Boolean = runCatching {
+        root.mkdirs()
+        check(tmp.length() > 1024) { "obf is implausibly small" }
+        val dest = File(root, "$id.obf")
+        dest.delete()
+        if (!tmp.renameTo(dest)) { tmp.copyTo(dest, overwrite = true); tmp.delete() }
+        synchronized(indexLock) { writeIndex(readIndex() + (id to box)) }
+        writeRev(id, rev)
+        true
+    }.getOrElse { tmp.delete(); false }
+
     fun delete(id: String) {
         File(root, "$id.obf").delete()
         synchronized(indexLock) { writeIndex(readIndex() - id) }
@@ -118,6 +131,6 @@ class ObfStore @Inject constructor(
         entries.forEach { (id, b) ->
             arr.put(JSONObject().put("id", id).put("bbox", JSONArray().put(b[0]).put(b[1]).put(b[2]).put(b[3])))
         }
-        indexFile.writeText(arr.toString())
+        app.vela.core.util.AtomicFiles.writeText(indexFile, arr.toString())
     }
 }
